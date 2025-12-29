@@ -164,6 +164,46 @@ public:
   bool isLoaded() const { return loaded_; }
   nvinfer1::ICudaEngine *getEngine() { return engine_.get(); }
 
+  /**
+   * @brief Gets the expected input dimensions from the compiled engine.
+   *
+   * CRITICAL: DLA engines are statically compiled. Dimension mismatch = memory
+   * corruption.
+   *
+   * @param[out] width Expected input width
+   * @param[out] height Expected input height
+   * @return true if dimensions were retrieved successfully
+   */
+  bool getInputDimensions(int &width, int &height) const {
+    if (!engine_)
+      return false;
+
+    // Find the "images" input tensor
+    int tensor_idx = engine_->getBindingIndex("images");
+    if (tensor_idx < 0) {
+      // Try first input if "images" not found
+      for (int i = 0; i < engine_->getNbIOTensors(); ++i) {
+        if (engine_->getTensorIOMode(engine_->getIOTensorName(i)) ==
+            nvinfer1::TensorIOMode::kINPUT) {
+          tensor_idx = i;
+          break;
+        }
+      }
+    }
+
+    if (tensor_idx < 0)
+      return false;
+
+    auto dims = engine_->getTensorShape(engine_->getIOTensorName(tensor_idx));
+    if (dims.nbDims < 4)
+      return false;
+
+    // Assuming NCHW format: dims = [N, C, H, W]
+    height = dims.d[2];
+    width = dims.d[3];
+    return true;
+  }
+
 private:
   struct RuntimeDeleter {
     void operator()(nvinfer1::IRuntime *p) {
@@ -273,6 +313,26 @@ public:
           CallbackReturn::FAILURE;
     }
     RCLCPP_INFO(this->get_logger(), "Loaded engine on DLA Core %d", dla_core);
+
+    // --- CRITICAL: Validate engine dimensions match ROS parameters ---
+    int engine_width = 0, engine_height = 0;
+    if (engine_->getInputDimensions(engine_width, engine_height)) {
+      if (engine_width != input_width_ || engine_height != input_height_) {
+        RCLCPP_FATAL(this->get_logger(),
+                     "FATAL: Engine dimension mismatch! "
+                     "Engine expects %dx%d, but ROS params specify %dx%d. "
+                     "This WILL cause memory corruption on DLA.",
+                     engine_width, engine_height, input_width_, input_height_);
+        return rclcpp_lifecycle::node_interfaces::LifecycleNodeInterface::
+            CallbackReturn::FAILURE;
+      }
+      RCLCPP_INFO(this->get_logger(), "Engine dimensions validated: %dx%d",
+                  engine_width, engine_height);
+    } else {
+      RCLCPP_WARN(this->get_logger(),
+                  "WARNING: Could not validate engine dimensions. "
+                  "Ensure input_width/height match the compiled engine!");
+    }
 
     // --- Allocate CUDA Resources ---
     cuda_stream_ = create_preprocess_stream();
