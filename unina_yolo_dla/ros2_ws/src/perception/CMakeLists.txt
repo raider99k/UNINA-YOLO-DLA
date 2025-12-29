@@ -60,28 +60,30 @@ ament_target_dependencies(perception_node
   std_msgs
 )
 
-# --- CUDA Preprocessing Library ---
+# --- CUDA Preprocessing and Post-Processing Library ---
 if(CUDA_FOUND)
-  # Build CUDA preprocessing kernels as a static library
-  add_library(cuda_preprocess STATIC
+  # Build CUDA kernels as a static library
+  add_library(cuda_kernels STATIC
     src/cuda_preprocess.cu
+    src/gpu_postprocess.cu
   )
   
   # Set CUDA architecture for Jetson Orin (SM 8.7)
-  set_target_properties(cuda_preprocess PROPERTIES
+  set_target_properties(cuda_kernels PROPERTIES
     CUDA_SEPARABLE_COMPILATION ON
     CUDA_ARCHITECTURES "87"  # Jetson Orin AGX/NX
   )
   
-  target_include_directories(cuda_preprocess PUBLIC
+  target_include_directories(cuda_kernels PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}/include
     ${CUDA_INCLUDE_DIRS}
   )
   
-  # Link CUDA preprocessing to perception node
-  target_link_libraries(perception_node cuda_preprocess ${CUDA_LIBRARIES})
+  # Link CUDA kernels to perception node
+  target_link_libraries(perception_node cuda_kernels ${CUDA_LIBRARIES})
   
-  message(STATUS "CUDA preprocessing kernels enabled (SM 8.7)")
+  message(STATUS "CUDA kernels enabled (preprocess + postprocess, SM 8.7)")
+
 else()
   message(WARNING "CUDA not found. Preprocessing will be CPU-only (slow).")
 endif()
