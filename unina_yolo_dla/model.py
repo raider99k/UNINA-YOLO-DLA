@@ -154,21 +154,40 @@ class Backbone(nn.Module):
     CSP-Darknet style backbone optimized for DLA.
     Outputs feature maps at P2 (stride 4), P3 (stride 8), P4 (stride 16).
     P5 is intentionally omitted for small-object focus.
+    
+    CBUF Warning:
+        The P2 stage (160x160) with full C3k2 may exceed DLA's CBUF (~1MB).
+        If trtexec shows memory spilling, use one of:
+          - lite_p2=True: Replace C3k2 with simple Conv2D at P2
+          - base_channels=16: Reduce all channel widths by 50%
+    
+    Args:
+        base_channels: Base channel width (32=standard, 16=lite for CBUF safety).
+        lite_p2: If True, use simple Conv2D at P2 instead of C3k2 (CBUF-friendly).
     """
-    def __init__(self, base_channels: int = 32) -> None:
+    def __init__(self, base_channels: int = 32, lite_p2: bool = False) -> None:
         super().__init__()
-        c1 = base_channels      # 32
-        c2 = base_channels * 2  # 64
-        c3 = base_channels * 4  # 128
-        c4 = base_channels * 8  # 256
-        c5 = base_channels * 16 # 512
+        self.lite_p2 = lite_p2
+        
+        c1 = base_channels      # 32 or 16
+        c2 = base_channels * 2  # 64 or 32
+        c3 = base_channels * 4  # 128 or 64
+        c4 = base_channels * 8  # 256 or 128
+        c5 = base_channels * 16 # 512 or 256
 
         # Stem: Input (3, 640, 640) -> (c1, 320, 320)
         self.stem = ConvBlock(3, c1, kernel_size=3, stride=2)
 
         # Stage 1: (c1, 320, 320) -> (c2, 160, 160) = P2 Output Level
         self.stage1_conv = ConvBlock(c1, c2, kernel_size=3, stride=2)
-        self.stage1_c3k2 = C3k2(c2, c2, n=1)
+        
+        if lite_p2:
+            # CBUF-friendly: Simple conv instead of C3k2
+            # Memory: ~1.6MB (160x160x32 FP16) vs ~6.5MB (160x160x64 with bottlenecks)
+            self.stage1_block = ConvBlock(c2, c2, kernel_size=3)
+        else:
+            # Full C3k2 (may cause DRAM spilling on DLA)
+            self.stage1_block = C3k2(c2, c2, n=1)
 
         # Stage 2: (c2, 160, 160) -> (c3, 80, 80) = P3 Output Level
         self.stage2_conv = ConvBlock(c2, c3, kernel_size=3, stride=2)
@@ -188,7 +207,7 @@ class Backbone(nn.Module):
         x = self.stem(x)
 
         x = self.stage1_conv(x)
-        p2 = self.stage1_c3k2(x)  # Output: stride 4, 160x160
+        p2 = self.stage1_block(x)  # Output: stride 4, 160x160
 
         x = self.stage2_conv(p2)
         p3 = self.stage2_c3k2(x)  # Output: stride 8, 80x80
@@ -306,20 +325,27 @@ class UNINA_YOLO_DLA(nn.Module):
         - Head: Decoupled heads for P2 (stride 4), P3 (stride 8), P4 (stride 16).
         - NO P5 Head (stride 32 is too coarse for small cone detection).
     
+    CBUF Optimization:
+        Use lite_p2=True if trtexec shows DRAM spilling at P2 stage.
+        Use base_channels=16 for maximum CBUF efficiency (at cost of accuracy).
+    
     Args:
         num_classes: Number of object classes (e.g., 4 for yellow, blue, orange, large orange).
-        base_channels: Base channel width for the backbone.
+        base_channels: Base channel width (32=standard, 16=lite).
+        lite_p2: If True, use lightweight P2 stage (CBUF-friendly).
     """
     def __init__(
         self,
         num_classes: int = 4,
         base_channels: int = 32,
+        lite_p2: bool = False,
     ) -> None:
         super().__init__()
         self.num_classes = num_classes
 
-        self.backbone = Backbone(base_channels=base_channels)
+        self.backbone = Backbone(base_channels=base_channels, lite_p2=lite_p2)
         self.neck = Neck(self.backbone.out_channels)
+
 
         # Detection heads for P2, P3, P4
         self.head_p2 = DetectionHead(self.neck.out_channels[0], num_classes)
