@@ -1,0 +1,27 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+venv/
+.env
+
+# TensorRT / ONNX
+*.engine
+*.trt
+*.onnx
+*.cache
+
+# Build
+build/
+install/
+log/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# ROS 2
+install/
+log/
+build/
+.vscode/

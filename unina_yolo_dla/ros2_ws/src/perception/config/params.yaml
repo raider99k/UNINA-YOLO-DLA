@@ -1,0 +1,22 @@
+perception_node:
+  ros__parameters:
+    # Model Configuration
+    engine_path: "unina_yolo_dla_int8_dla1.engine"
+    input_width: 640
+    input_height: 640
+    num_classes: 4
+    
+    # DLA Configuration
+    dla_core: 1 # Standard: Core 1 for perception
+    
+    # Detection Settings
+    confidence_threshold: 0.5
+    iou_threshold: 0.45
+    
+    # Normalization (ImageNet defaults)
+    norm_mean: [0.485, 0.456, 0.406]
+    norm_std: [0.229, 0.224, 0.225]
+    
+    # Topics
+    image_topic: "/zed/zed_node/left/image_rect_color"
+    detections_topic: "/perception/detections"

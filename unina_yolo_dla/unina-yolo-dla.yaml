@@ -1,0 +1,98 @@
+# UNINA-YOLO-DLA Model Configuration
+# Optimized for NVIDIA Jetson Orin DLA (Deep Learning Accelerator)
+# 
+# Key Constraints:
+#   - ReLU only (no SiLU)
+#   - P2, P3, P4 heads (no P5)
+#   - Static shapes (640x640)
+#   - No dynamic slicing operations
+
+# Scaling factors (YOLOv11n-based)
+depth_multiple: 0.50  # Bottleneck depth
+width_multiple: 0.25  # Channel width
+
+# Activation function (CRITICAL: DLA requires ReLU)
+activation: ReLU
+
+# Input specification
+input:
+  channels: 3
+  height: 640
+  width: 640
+  batch_size: 1  # Static batch for DLA
+
+# Backbone: CSP-Darknet style (DLA-optimized)
+backbone:
+  # [from, repeats, module, args]
+  # Stem
+  - [-1, 1, ConvBlock, [32, 3, 2]]           # 0: P1/2 (320x320)
+  
+  # Stage 1 -> P2 output
+  - [-1, 1, ConvBlock, [64, 3, 2]]           # 1: P2/4 (160x160)
+  - [-1, 1, C3k2, [64, 1, True]]             # 2: P2 features
+  
+  # Stage 2 -> P3 output
+  - [-1, 1, ConvBlock, [128, 3, 2]]          # 3: P3/8 (80x80)
+  - [-1, 2, C3k2, [128, 2, True]]            # 4: P3 features
+  
+  # Stage 3 -> P4 output
+  - [-1, 1, ConvBlock, [256, 3, 2]]          # 5: P4/16 (40x40)
+  - [-1, 2, C3k2, [256, 2, True]]            # 6: P4 features
+  
+  # Stage 4 -> Context (NO P5 HEAD)
+  - [-1, 1, ConvBlock, [512, 3, 2]]          # 7: 20x20 (context only)
+  - [-1, 1, SPPF_DLA, [512, 5]]              # 8: SPPF for context
+
+# Neck: FPN + PAN (DLA-optimized, no complex attention)
+neck:
+  # Top-Down (FPN)
+  - [-1, 1, ConvBlock, [256, 1, 1]]          # 9: Reduce channels
+  - [-1, 1, Upsample, [2]]                   # 10: 40x40
+  - [[-1, 6], 1, Concat, [1]]                # 11: Concat with P4
+  - [-1, 1, C3k2, [256, 1, False]]           # 12: FPN P4
+
+  - [-1, 1, ConvBlock, [128, 1, 1]]          # 13: Reduce channels
+  - [-1, 1, Upsample, [2]]                   # 14: 80x80
+  - [[-1, 4], 1, Concat, [1]]                # 15: Concat with P3
+  - [-1, 1, C3k2, [128, 1, False]]           # 16: FPN P3
+
+  - [-1, 1, ConvBlock, [64, 1, 1]]           # 17: Reduce channels
+  - [-1, 1, Upsample, [2]]                   # 18: 160x160
+  - [[-1, 2], 1, Concat, [1]]                # 19: Concat with P2
+  - [-1, 1, C3k2, [64, 1, False]]            # 20: FPN P2 (output)
+
+  # Bottom-Up (PAN)
+  - [-1, 1, ConvBlock, [64, 3, 2]]           # 21: 80x80
+  - [[-1, 16], 1, Concat, [1]]               # 22: Concat with FPN P3
+  - [-1, 1, C3k2, [128, 1, False]]           # 23: PAN P3 (output)
+
+  - [-1, 1, ConvBlock, [128, 3, 2]]          # 24: 40x40
+  - [[-1, 12], 1, Concat, [1]]               # 25: Concat with FPN P4
+  - [-1, 1, C3k2, [256, 1, False]]           # 26: PAN P4 (output)
+
+# Detection Heads (Decoupled)
+head:
+  # P2 Head (Stride 4, 160x160) - Critical for small/distant cones
+  - [[20], 1, DetectionHead, [4, 64]]        # P2: 4 classes, 64 channels
+
+  # P3 Head (Stride 8, 80x80)
+  - [[23], 1, DetectionHead, [4, 128]]       # P3: 4 classes, 128 channels
+
+  # P4 Head (Stride 16, 40x40)
+  - [[26], 1, DetectionHead, [4, 256]]       # P4: 4 classes, 256 channels
+
+  # NOTE: P5 Head (Stride 32) is REMOVED - not needed for cone detection
+
+# Classes (Formula Student Cones)
+names:
+  0: yellow_cone
+  1: blue_cone
+  2: orange_cone
+  3: large_orange_cone
+
+# DLA-specific settings
+dla:
+  target_core: 0           # DLA Core 0 (or 1)
+  allow_gpu_fallback: false # MUST be false for production
+  precision: int8          # INT8 with Entropy calibration
+  calibration_method: entropy  # NOT minmax
