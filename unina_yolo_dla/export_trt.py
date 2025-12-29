@@ -113,23 +113,36 @@ class ConeCalibrationStream:
     """
     Calibration data stream that reads images from a folder.
     
-    Used by the INT8 calibrator to load batches of calibration images.
-    Expected folder structure: calib_imgs/*.jpg (or .png)
+    CRITICAL: Preprocessing MUST match cuda_preprocess.cu exactly!
+    - Resize to input_size x input_size
+    - Normalize with ImageNet mean/std
+    - Output range: approximately [-2.1, +2.6]
     
     Args:
         calib_folder: Path to folder containing calibration images.
         input_size: Target input size (images will be resized).
         batch_size: Number of images per batch.
+        mean: ImageNet mean (RGB).
+        std: ImageNet std (RGB).
     """
+    
+    # ImageNet normalization (MUST match cuda_preprocess.cu NormParams!)
+    DEFAULT_MEAN = (0.485, 0.456, 0.406)
+    DEFAULT_STD = (0.229, 0.224, 0.225)
+    
     def __init__(
         self,
         calib_folder: str | Path,
         input_size: int = 640,
         batch_size: int = 1,
+        mean: tuple[float, float, float] = DEFAULT_MEAN,
+        std: tuple[float, float, float] = DEFAULT_STD,
     ) -> None:
         self.calib_folder = Path(calib_folder)
         self.input_size = input_size
         self.batch_size = batch_size
+        self.mean = np.array(mean, dtype=np.float32).reshape(3, 1, 1)
+        self.std = np.array(std, dtype=np.float32).reshape(3, 1, 1)
         self.current_index = 0
         
         # Find all images in the folder
@@ -143,28 +156,38 @@ class ConeCalibrationStream:
             print(f"WARNING: No images found in {self.calib_folder}")
         else:
             print(f"[ConeCalibrationStream] Found {len(self.image_paths)} images")
+            print(f"[ConeCalibrationStream] Using mean={mean}, std={std}")
     
     def _load_and_preprocess(self, image_path: str) -> np.ndarray:
-        """Loads an image and preprocesses it for the model."""
+        """
+        Loads an image and preprocesses it EXACTLY like cuda_preprocess.cu.
+        
+        CRITICAL: This must match the CUDA kernel normalization!
+        Formula: (pixel/255.0 - mean) / std
+        Output range: approximately [-2.1, +2.6] for ImageNet stats
+        """
         try:
-            # Try to use PIL/OpenCV if available
-            try:
-                from PIL import Image
-                img = Image.open(image_path).convert('RGB')
-                img = img.resize((self.input_size, self.input_size))
-                img_np = np.array(img, dtype=np.float32)
-            except ImportError:
-                # Fallback to random data if PIL not available
-                img_np = np.random.rand(self.input_size, self.input_size, 3).astype(np.float32) * 255
-            
-            # HWC -> CHW
-            img_np = img_np.transpose(2, 0, 1)
-            # Normalize to [0, 1]
-            img_np = img_np / 255.0
-            return img_np
+            from PIL import Image
+            img = Image.open(image_path).convert('RGB')
+            img = img.resize((self.input_size, self.input_size))
+            img_np = np.array(img, dtype=np.float32)
+        except ImportError:
+            # Fallback to random data if PIL not available
+            img_np = np.random.rand(self.input_size, self.input_size, 3).astype(np.float32) * 255
         except Exception as e:
             print(f"Error loading {image_path}: {e}")
             return np.zeros((3, self.input_size, self.input_size), dtype=np.float32)
+        
+        # HWC -> CHW
+        img_np = img_np.transpose(2, 0, 1)
+        
+        # CRITICAL: Apply ImageNet normalization (matching CUDA kernel!)
+        # Formula: (pixel/255.0 - mean) / std
+        img_np = img_np / 255.0
+        img_np = (img_np - self.mean) / self.std
+        
+        return img_np
+
     
     def get_batch(self) -> np.ndarray | None:
         """Returns the next batch of images, or None if exhausted."""
