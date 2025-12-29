@@ -1,0 +1,25 @@
+# UNINA-YOLO-DLA Dataset Configuration
+# 
+# This is a template for the Ultralytics YOLO data format.
+# Modify paths to match your dataset location.
+
+# Dataset root path (absolute or relative to train.py)
+path: /path/to/fsd_dataset  # <-- MODIFY THIS
+
+# Train/Val/Test splits
+train: images/train
+val: images/val
+test: images/test  # Optional
+
+# Class definitions (Formula Student Cones)
+names:
+  0: yellow_cone
+  1: blue_cone
+  2: orange_cone
+  3: large_orange_cone
+
+# Number of classes
+nc: 4
+
+# Optional: Download script (if dataset is hosted online)
+# download: https://example.com/dataset.zip

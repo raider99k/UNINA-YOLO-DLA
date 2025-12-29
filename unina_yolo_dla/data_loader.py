@@ -23,8 +23,7 @@ import torch
 from torch.utils.data import Dataset, DataLoader, ConcatDataset, WeightedRandomSampler
 import numpy as np
 
-# Placeholder for actual image loading; replace with OpenCV or PIL in practice.
-# For now, we define the interface.
+import cv2  # OpenCV for image loading
 
 
 # --- Dataset Definitions ---
@@ -83,20 +82,19 @@ class YOLODataset(Dataset):
     def __getitem__(self, idx: int) -> dict:
         """
         Returns a dictionary with 'image', 'labels', and 'path'.
-        'image' is a (C, H, W) float tensor (placeholder: random).
+        'image' is a (C, H, W) float tensor normalized to [0, 1].
         'labels' is a (N, 5) tensor: [class_id, x_c, y_c, w, h].
         """
         img_path = self.image_paths[idx]
         label_path = self.labels_dir / (img_path.stem + ".txt")
 
-        # --- Image Loading (Placeholder) ---
-        # In a real implementation, use:
-        # from PIL import Image
-        # image = Image.open(img_path).convert("RGB")
-        # image = transforms.ToTensor()(image)
-        # For this skeleton, we produce a dummy tensor.
-        # The actual image loading should be implemented during integration.
-        image = torch.randn(3, 640, 640)  # Placeholder
+        # --- Image Loading (Real Implementation) ---
+        img = cv2.imread(str(img_path))
+        if img is None:
+            raise FileNotFoundError(f"Could not load image: {img_path}")
+        img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+        img = cv2.resize(img, (640, 640))
+        image = torch.from_numpy(img).permute(2, 0, 1).float() / 255.0
 
         # --- Label Loading ---
         labels = []
@@ -348,6 +346,7 @@ class SmallObjectMetric:
                         best_gt_idx = i
                 
                 if best_iou >= self.iou_threshold:
+                    # MATCH FOUND: Prediction correctly identified a small object.
                     self.true_positives += 1
                     matched_gt.add(best_gt_idx)
                 else:
