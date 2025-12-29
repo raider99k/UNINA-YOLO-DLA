@@ -18,6 +18,16 @@ find_package(lifecycle_msgs REQUIRED)
 find_package(sensor_msgs REQUIRED)
 find_package(vision_msgs REQUIRED)
 find_package(std_msgs REQUIRED)
+find_package(rosidl_default_generators REQUIRED)
+
+# --- Custom Message Generation (Zero-Copy GPU Buffer Pointer) ---
+rosidl_generate_interfaces(${PROJECT_NAME}
+  "msg/GpuBufferPtr.msg"
+  DEPENDENCIES std_msgs
+)
+
+# Allow perception_node to use generated messages
+rosidl_get_typesupport_target(cpp_typesupport_target ${PROJECT_NAME} "rosidl_typesupport_cpp")
 
 # CUDA (for preprocessing kernels)
 find_package(CUDA)
@@ -92,6 +102,10 @@ endif()
 if(TENSORRT_LIBRARY)
   target_link_libraries(perception_node ${TENSORRT_LIBRARY})
 endif()
+
+# Link generated message typesupport
+target_link_libraries(perception_node ${cpp_typesupport_target})
+
 
 # --- Install ---
 install(TARGETS

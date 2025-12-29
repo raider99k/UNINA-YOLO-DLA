@@ -31,6 +31,9 @@
 #include <sensor_msgs/msg/image.hpp>
 #include <vision_msgs/msg/detection2_d_array.hpp>
 
+// Custom zero-copy message
+#include <perception/msg/gpu_buffer_ptr.hpp>
+
 // CUDA Runtime
 #include <cuda_runtime.h>
 
@@ -274,6 +277,8 @@ public:
     this->declare_parameter<std::vector<double>>("norm_std",
                                                  {0.229, 0.224, 0.225});
     this->declare_parameter<int>("dla_core", 1);
+    this->declare_parameter<std::string>("gpu_buffer_topic",
+                                         "/camera/gpu_buffer");
 
     RCLCPP_INFO(this->get_logger(), "PerceptionNodeLifecycle constructed.");
   }
@@ -350,6 +355,20 @@ public:
         this->create_publisher<vision_msgs::msg::Detection2DArray>(
             detections_topic, rclcpp::QoS(1).best_effort());
 
+    // --- Zero-Copy Subscriber (PRIMARY PATH) ---
+    std::string gpu_buffer_topic =
+        this->get_parameter("gpu_buffer_topic").as_string();
+    rclcpp::QoS qos(1);
+    qos.best_effort().durability_volatile();
+
+    gpu_buffer_sub_ = this->create_subscription<perception::msg::GpuBufferPtr>(
+        gpu_buffer_topic, qos,
+        std::bind(&PerceptionNodeLifecycle::gpuBufferCallback, this,
+                  std::placeholders::_1));
+
+    RCLCPP_INFO(this->get_logger(), "Zero-copy subscriber listening on: %s",
+                gpu_buffer_topic.c_str());
+
     RCLCPP_INFO(this->get_logger(), "Configured. Ready to activate.");
     return rclcpp_lifecycle::node_interfaces::LifecycleNodeInterface::
         CallbackReturn::SUCCESS;
@@ -388,6 +407,37 @@ public:
   }
 
   // =========================================================================
+  // Zero-Copy ROS 2 Callback (PRIMARY PATH)
+  // =========================================================================
+
+  /**
+   * @brief Callback for GpuBufferPtr messages (TRUE ZERO-COPY).
+   *
+   * This is the production path. Receives GPU pointer from ZED SDK wrapper
+   * or NvBufSurface publisher, then calls processGpuBuffer().
+   */
+  void gpuBufferCallback(const perception::msg::GpuBufferPtr::SharedPtr msg) {
+    // Convert ROS message to internal handle
+    GpuBufferHandle buffer;
+    buffer.device_ptr = reinterpret_cast<void *>(msg->device_ptr);
+    buffer.width = msg->width;
+    buffer.height = msg->height;
+    buffer.pitch = msg->pitch;
+    buffer.format = msg->format;
+    buffer.timestamp_ns = rclcpp::Time(msg->header.stamp).nanoseconds();
+
+    if (!buffer.isValid()) {
+      RCLCPP_WARN_THROTTLE(
+          this->get_logger(), *this->get_clock(), 1000,
+          "Received invalid GpuBufferPtr (null device_ptr or zero dimensions)");
+      return;
+    }
+
+    // Process via zero-copy pipeline
+    processGpuBuffer(buffer, buffer.timestamp_ns);
+  }
+
+  // =========================================================================
   // Primary Inference Pipeline (Zero-Copy GPU Buffer)
   // =========================================================================
 
@@ -399,6 +449,7 @@ public:
   void processGpuBuffer(const GpuBufferHandle &buffer, uint64_t timestamp_ns) {
     if (this->get_current_state().id() !=
         lifecycle_msgs::msg::State::PRIMARY_STATE_ACTIVE) {
+
       return;
     }
 
@@ -617,6 +668,10 @@ private:
   float conformal_q_ = 0.1f;
   int input_width_ = 640;
   int input_height_ = 640;
+
+  // Zero-copy subscriber
+  rclcpp::Subscription<perception::msg::GpuBufferPtr>::SharedPtr
+      gpu_buffer_sub_;
 
   std::shared_ptr<
       rclcpp_lifecycle::LifecyclePublisher<vision_msgs::msg::Detection2DArray>>
