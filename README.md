@@ -59,5 +59,4 @@ The C++ ROS 2 node (`perception_node`) implements a **Zero-Copy** data flow:
 - `ros2_ws/src/perception/`: ROS 2 package for C++ inference node.
 - `unina_yolo_dla/model.py`: PyTorch architecture definition.
 
----
-*Developed by Unina Corse - Senior Embedded AI Architecture Team.*
+
