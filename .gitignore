@@ -25,3 +25,9 @@ install/
 log/
 build/
 .vscode/
+
+# Working files
+RESEARCH.md
+INSTRUCTIONS.md
+MORERESEARCH.md
+PROMPTS.md
