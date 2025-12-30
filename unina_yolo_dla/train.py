@@ -48,7 +48,7 @@ except ImportError:
 
 # --- Local Module Imports ---
 try:
-    from data_loader import create_hybrid_dataloader, SmallObjectMetric
+    from data_loader import create_active_learning_dataloader, SmallObjectMetric
     DATA_LOADER_AVAILABLE = True
 except ImportError:
     DATA_LOADER_AVAILABLE = False
@@ -208,18 +208,17 @@ if ULTRALYTICS_AVAILABLE:
         Supports hybrid data loading (70% Real / 30% Synthetic).
         """
         
-        # Class-level config for hybrid loading (set via set_hybrid_config)
-        hybrid_config = None
+        # Class-level config for active learning (set via set_active_learning_config)
+        active_learning_config = None
         
         @classmethod
-        def set_hybrid_config(cls, real_root: str, synthetic_root: str, real_ratio: float = 0.7):
-            """Configure hybrid data loading."""
-            cls.hybrid_config = {
-                "real_root": real_root,
-                "synthetic_root": synthetic_root,
-                "real_ratio": real_ratio,
+        def set_active_learning_config(cls, dataset_root: str, difficulty_scores: dict = None):
+            """Configure active learning data loading."""
+            cls.active_learning_config = {
+                "dataset_root": dataset_root,
+                "difficulty_scores": difficulty_scores,
             }
-            print(f">>> Hybrid config set: {real_ratio*100:.0f}% Real / {(1-real_ratio)*100:.0f}% Synthetic")
+            print(f">>> Active Learning config set for dataset: {dataset_root}")
         
         def get_model(self, cfg=None, weights=None, verbose=True):
             """
@@ -246,13 +245,12 @@ if ULTRALYTICS_AVAILABLE:
             If hybrid_config is set, uses create_hybrid_dataloader from data_loader.py.
             Otherwise, falls back to the default Ultralytics dataloader.
             """
-            if mode == "train" and self.hybrid_config and DATA_LOADER_AVAILABLE:
-                print(f">>> Using Hybrid DataLoader for training")
-                return create_hybrid_dataloader(
-                    real_dataset_root=self.hybrid_config["real_root"],
-                    synthetic_dataset_root=self.hybrid_config["synthetic_root"],
+            if mode == "train" and self.active_learning_config and DATA_LOADER_AVAILABLE:
+                print(f">>> Using Active Learning DataLoader for training")
+                return create_active_learning_dataloader(
+                    dataset_root=self.active_learning_config["dataset_root"],
                     batch_size=batch_size,
-                    real_to_synthetic_ratio=self.hybrid_config["real_ratio"],
+                    difficulty_scores=self.active_learning_config["difficulty_scores"],
                     num_workers=self.args.workers,
                 )
             else:
@@ -753,10 +751,9 @@ def main():
     parser.add_argument('--skip-qat', action='store_true', help="Skip QAT phase")
     parser.add_argument('--export', action='store_true', help="Export to ONNX after training")
     
-    # Hybrid Data (RESEARCH.md Section 5.1)
-    parser.add_argument('--real-root', type=str, default=None, help="Path to real dataset (for 70/30 hybrid)")
-    parser.add_argument('--synthetic-root', type=str, default=None, help="Path to synthetic dataset (for 70/30 hybrid)")
-    parser.add_argument('--real-ratio', type=float, default=0.7, help="Real data ratio (default 0.7 = 70%%)")
+    # Active Learning (EVENMORERESEARCH.md)
+    parser.add_argument('--dataset-root', type=str, default=None, help="Path to real dataset (for active learning)")
+    parser.add_argument('--difficulty-map', type=str, default=None, help="Path to .json file with difficulty scores")
     
     # Conformal Prediction (RESEARCH.md Section 5.2)
     parser.add_argument('--calibrate-cp', action='store_true', help="Run Conformal Prediction calibration after training")
@@ -772,16 +769,18 @@ def main():
     model_yaml = args.model
     data_yaml = args.data
     
-    # Log hybrid data config if specified
-    if args.real_root and args.synthetic_root:
-        print(f">>> Hybrid Data Mode: {args.real_ratio*100:.0f}% Real / {(1-args.real_ratio)*100:.0f}% Synthetic")
-        print(f"    Real: {args.real_root}")
-        print(f"    Synthetic: {args.synthetic_root}")
-        # Configure the custom trainer for hybrid loading
-        UninaDLATrainer.set_hybrid_config(
-            real_root=args.real_root,
-            synthetic_root=args.synthetic_root,
-            real_ratio=args.real_ratio,
+    # Log active learning config if specified
+    if args.dataset_root:
+        difficulty_scores = None
+        if args.difficulty_map and os.path.exists(args.difficulty_map):
+            import json
+            with open(args.difficulty_map, 'r') as f:
+                difficulty_scores = json.load(f)
+        
+        # Configure the custom trainer for active learning loading
+        UninaDLATrainer.set_active_learning_config(
+            dataset_root=args.dataset_root,
+            difficulty_scores=difficulty_scores,
         )
     
     # Phase 1: FP32 Training

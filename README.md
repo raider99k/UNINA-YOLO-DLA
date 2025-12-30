@@ -26,9 +26,11 @@ The model is customized to meet DLA hardware constraints and the specific needs 
 
 ## 3. Implementation Modules
 
-### Module 1: Training & Optimization
-The training pipeline utilizes a hybrid approach:
-- **Data Ingestion**: A mix of real-world captures (40k images) and synthetic data enhanced via **CycleGAN** (Sim-to-Real adaptation).
+### Module 1: Data-Centric Training Pipeline
+The project adopts a **Data-Centric AI strategy**, abandoning synthetic data in favor of a "Platinum-Standard" real-world dataset:
+- **Auto-Labeling**: High-quality offline annotation using **GroundingDINO** (box proposals), **SAM** (segmentation masks), and **SAHI** (tiled high-res inference).
+- **Active Learning**: Informative sample selection using **Entropy** and **Localization Variance** query functions to prioritize "hard" real examples.
+- **Augmentation**: Real-to-real **Copy-Paste** augmentation using cone assets extracted from real frames.
 - **Small Object Metrics**: Validation includes a custom `mAP_small` metric specifically for cones under 15x15 pixels.
 
 ### Module 2: Exporting for Deployment
@@ -41,7 +43,7 @@ The C++ ROS 2 node (`perception_node`) implements a **Zero-Copy** data flow:
 1. **Ingestion**: Direct mapping from ROS message to CUDA memory (`NvBufSurface`).
 2. **Preprocessing**: GPU-based normalization.
 3. **Inference**: Enqueued to the DLA context.
-4. **Post-processing**: NMS performed on GPU.
+4. **Post-processing**: NMS and Conformal Prediction performed on GPU.
 
 ## 4. Requirements & Setup
 
@@ -51,12 +53,16 @@ The C++ ROS 2 node (`perception_node`) implements a **Zero-Copy** data flow:
   - ROS 2 Humble/Jazzy
   - TensorRT 8.x / 10.x
   - `pytorch-quantization` toolkit
+  - `ultralytics`
 
 ## 5. Project Structure
 
 - `unina_yolo_dla/train.py`: Main training script with QAT logic.
-- `unina_yolo_dla/fsd_data.yaml`: Dataset configuration.
+- `unina_yolo_dla/auto_labeler.py`: Offline auto-labeling pipeline.
+- `unina_yolo_dla/active_learning.py`: Dataset curation and Active Learning logic.
+- `unina_yolo_dla/data_loader.py`: Reality-driven Dataloader with weight-based sampling.
+- `unina_yolo_dla/model.py`: DLA-optimized architecture definition.
+- `unina_yolo_dla/eval.py`: Evaluation script for local metrics.
 - `ros2_ws/src/perception/`: ROS 2 package for C++ inference node.
-- `unina_yolo_dla/model.py`: PyTorch architecture definition.
 
 

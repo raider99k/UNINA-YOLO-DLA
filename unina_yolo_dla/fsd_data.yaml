@@ -3,13 +3,11 @@
 # This is a template for the Ultralytics YOLO data format.
 # Modify paths to match your dataset location.
 
-# Dataset root path (absolute or relative to train.py)
-path: /path/to/fsd_dataset  # <-- MODIFY THIS
-
-# Train/Val/Test splits
-train: images/train
-val: images/val
-test: images/test  # Optional
+# Reality-Driven Dataset Structure (Data-Centric AI)
+# path: /home/jetson/unina_dla_dataset
+train: images/gold   # Manually verified set
+val: images/val      # High-quality validation set
+test: images/silver  # Auto-labeled set for testing/mining
 
 # Class definitions (Formula Student Cones)
 names:

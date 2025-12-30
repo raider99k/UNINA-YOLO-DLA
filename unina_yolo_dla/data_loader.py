@@ -50,19 +50,16 @@ class YOLODataset(Dataset):
     Args:
         root: Path to the dataset root directory.
         transform: Optional callable to apply transformations to images.
-        is_synthetic: If True, marks this dataset as synthetic (for sampling weight).
     """
     def __init__(
         self,
         root: str | Path,
         transform: Callable | None = None,
-        is_synthetic: bool = False,
     ) -> None:
         self.root = Path(root)
         self.images_dir = self.root / "images"
         self.labels_dir = self.root / "labels"
         self.transform = transform
-        self.is_synthetic = is_synthetic
 
         # Gather all image paths
         if not self.images_dir.exists():
@@ -117,81 +114,61 @@ class YOLODataset(Dataset):
             "image": image,
             "labels": labels_tensor,
             "path": str(img_path),
-            "is_synthetic": self.is_synthetic,
         }
 
 
-def create_hybrid_dataloader(
-    real_dataset_root: str | Path,
-    synthetic_dataset_root: str | Path,
+def create_active_learning_dataloader(
+    dataset_root: str | Path,
     batch_size: int = 16,
-    real_to_synthetic_ratio: float = 0.6,
+    hard_example_ratio: float = 0.3,
     num_workers: int = 4,
     transform: Callable | None = None,
+    difficulty_scores: dict[str, float] | None = None,
 ) -> DataLoader:
     """
-    Creates a DataLoader that mixes Real and Synthetic datasets.
+    Creates a DataLoader optimized for Active Learning and Hard Example Mining.
 
-    Uses WeightedRandomSampler to control the proportion of real vs. synthetic
-    samples seen per epoch. This is crucial for domain adaptation.
+    Uses WeightedRandomSampler to prioritize samples with high uncertainty
+    or difficulty scores (e.g., from Entropy or Localization Variance).
 
     Args:
-        real_dataset_root: Path to the real dataset.
-        synthetic_dataset_root: Path to the synthetic (e.g., UE5) dataset.
+        dataset_root: Path to the real dataset.
         batch_size: The batch size for the DataLoader.
-        real_to_synthetic_ratio: Target proportion of real samples (0.0 to 1.0).
+        hard_example_ratio: Target proportion of high-difficulty samples.
         num_workers: Number of worker processes for data loading.
-        transform: Transforms to apply to both datasets.
+        transform: Transforms to apply.
+        difficulty_scores: Dictionary mapping image paths to difficulty scores.
 
     Returns:
         A configured PyTorch DataLoader.
     """
-    real_dataset = YOLODataset(real_dataset_root, transform=transform, is_synthetic=False)
-    synthetic_dataset = YOLODataset(synthetic_dataset_root, transform=transform, is_synthetic=True)
+    dataset = YOLODataset(dataset_root, transform=transform)
+    total_samples = len(dataset)
 
-    # Concatenate datasets
-    combined_dataset = ConcatDataset([real_dataset, synthetic_dataset])
+    # Default weights: uniform
+    sample_weights = [1.0] * total_samples
 
-    # Calculate weights for sampling
-    # Weight for real samples
-    w_real = real_to_synthetic_ratio
-    # Weight for synthetic samples
-    w_synthetic = 1.0 - real_to_synthetic_ratio
+    if difficulty_scores:
+        # Assign weights based on difficulty scores
+        # We normalize scores to use as sampling probabilities
+        sample_weights = []
+        for img_path in dataset.image_paths:
+            # Score could be Entropy, Loss, or custom uncertainty metric
+            score = difficulty_scores.get(str(img_path), 1.0)
+            sample_weights.append(score)
 
-    # Assign weight to each sample index
-    sample_weights = (
-        [w_real] * len(real_dataset) +
-        [w_synthetic] * len(synthetic_dataset)
-    )
-    
-    # Normalize weights inversely by count to balance representation
-    # E.g., if real has 100 samples and synthetic has 1000:
-    # real_weight_per_sample = (target_ratio * total) / real_count
-    total_samples = len(combined_dataset)
-    real_count = len(real_dataset)
-    syn_count = len(synthetic_dataset)
-
-    if real_count > 0 and syn_count > 0:
-        # Adjust weights so that weighted sampling achieves the target ratio
-        weight_for_real = (real_to_synthetic_ratio / real_count)
-        weight_for_syn = ((1 - real_to_synthetic_ratio) / syn_count)
-        sample_weights = (
-            [weight_for_real] * real_count +
-            [weight_for_syn] * syn_count
-        )
-    
     sampler = WeightedRandomSampler(
         weights=sample_weights,
         num_samples=total_samples,
-        replacement=True,  # Allow replacement for balancing
+        replacement=True,
     )
 
     return DataLoader(
-        combined_dataset,
+        dataset,
         batch_size=batch_size,
         sampler=sampler,
         num_workers=num_workers,
-        collate_fn=collate_fn,  # Custom collate for variable-size labels
+        collate_fn=collate_fn,
         pin_memory=True,
     )
 
@@ -205,14 +182,10 @@ def collate_fn(batch: list[dict]) -> dict:
     # Labels need to be kept as a list of tensors since N varies.
     labels = [item["labels"] for item in batch]
     
-    paths = [item["path"] for item in batch]
-    is_synthetic = [item["is_synthetic"] for item in batch]
-
     return {
         "images": images,
         "labels": labels,
         "paths": paths,
-        "is_synthetic": is_synthetic,
     }
 
 
