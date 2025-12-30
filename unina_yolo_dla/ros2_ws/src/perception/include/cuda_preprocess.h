@@ -9,8 +9,17 @@
 #define CUDA_PREPROCESS_H
 
 #include <cstdint>
-#include <cuda_runtime.h>
 
+// =============================================================================
+// MOCK_CUDA: Stub types for compiling without CUDA toolkit
+// =============================================================================
+#ifdef MOCK_CUDA
+typedef int cudaError_t;
+typedef void *cudaStream_t;
+#define cudaSuccess 0
+#else
+#include <cuda_runtime.h>
+#endif
 
 #ifdef JETPACK_AVAILABLE
 #include <nvbufsurface.h>

@@ -7,7 +7,17 @@
 #ifndef GPU_POSTPROCESS_H
 #define GPU_POSTPROCESS_H
 
+// =============================================================================
+// MOCK_CUDA: Stub types for compiling without CUDA toolkit
+// =============================================================================
+#ifdef MOCK_CUDA
+typedef int cudaError_t;
+typedef void *cudaStream_t;
+#define cudaSuccess 0
+#define __align__(x)
+#else
 #include <cuda_runtime.h>
+#endif
 
 #define MAX_DETECTIONS 1024
 

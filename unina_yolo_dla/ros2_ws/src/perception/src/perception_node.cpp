@@ -34,6 +34,120 @@
 // Custom zero-copy message
 #include <perception/msg/gpu_buffer_ptr.hpp>
 
+// =============================================================================
+// MOCK_CUDA: Compile without CUDA/TensorRT for ROS 2 infrastructure testing
+// =============================================================================
+#ifdef MOCK_CUDA
+
+#include <cstdint>
+
+// Fake CUDA types
+typedef int cudaError_t;
+typedef void *cudaStream_t;
+#define cudaSuccess 0
+
+inline const char *cudaGetErrorString(cudaError_t) { return "MOCK_CUDA"; }
+inline cudaError_t cudaStreamSynchronize(cudaStream_t) { return cudaSuccess; }
+inline cudaError_t cudaMalloc(void **ptr, size_t size) {
+  *ptr = malloc(size);
+  return cudaSuccess;
+}
+inline cudaError_t cudaFree(void *ptr) {
+  free(ptr);
+  return cudaSuccess;
+}
+inline cudaError_t cudaMemcpyAsync(void *, const void *, size_t, int,
+                                   cudaStream_t) {
+  return cudaSuccess;
+}
+#define cudaMemcpyHostToDevice 0
+
+// Fake TensorRT namespace
+namespace nvinfer1 {
+enum class Severity { kINTERNAL_ERROR, kERROR, kWARNING, kINFO, kVERBOSE };
+enum class TensorIOMode { kINPUT, kOUTPUT };
+struct Dims {
+  int nbDims;
+  int d[8];
+};
+
+class ILogger {
+public:
+  virtual void log(Severity, const char *) noexcept = 0;
+  virtual ~ILogger() = default;
+};
+class IRuntime {
+public:
+  void setDLACore(int) {}
+  void destroy() {}
+};
+class ICudaEngine {
+public:
+  int getNbIOTensors() { return 0; }
+  const char *getIOTensorName(int) { return ""; }
+  TensorIOMode getTensorIOMode(const char *) { return TensorIOMode::kOUTPUT; }
+  int getBindingIndex(const char *) { return -1; }
+  Dims getTensorShape(const char *) { return Dims{4, {1, 3, 640, 640}}; }
+  void destroy() {}
+};
+class IExecutionContext {
+public:
+  void setTensorAddress(const char *, void *) {}
+  bool enqueueV3(cudaStream_t) { return true; }
+  void destroy() {}
+};
+inline IRuntime *createInferRuntime(ILogger &) { return nullptr; }
+} // namespace nvinfer1
+
+// Fake preprocess functions
+struct NormParams {
+  float mean_r, mean_g, mean_b, std_r, std_g, std_b;
+};
+inline NormParams create_norm_params(float mr, float mg, float mb, float sr,
+                                     float sg, float sb) {
+  return NormParams{mr, mg, mb, sr, sg, sb};
+}
+inline cudaStream_t create_preprocess_stream() { return nullptr; }
+inline void destroy_preprocess_stream(cudaStream_t) {}
+inline float *allocate_preprocess_buffer(int, int) { return nullptr; }
+inline void free_preprocess_buffer(float *) {}
+inline cudaError_t preprocess_bgra_resize(const uint8_t *, float *, int, int,
+                                          int, int, int, NormParams,
+                                          cudaStream_t) {
+  return cudaSuccess;
+}
+
+// Fake postprocess functions
+struct GpuDetection {
+  float x1, y1, x2, y2;
+  float confidence;
+  int class_id;
+  int valid;
+  int _pad;
+};
+#define MAX_DETECTIONS 1024
+inline cudaError_t reset_detection_counter(cudaStream_t) { return cudaSuccess; }
+inline cudaError_t get_detection_count(int *count, cudaStream_t) {
+  *count = 0;
+  return cudaSuccess;
+}
+inline cudaError_t decode_yolo_head(const float *, const float *,
+                                    GpuDetection *, int, int, int, int, float,
+                                    float, cudaStream_t) {
+  return cudaSuccess;
+}
+inline cudaError_t run_gpu_nms(GpuDetection *, int, float, cudaStream_t) {
+  return cudaSuccess;
+}
+inline cudaError_t copy_valid_detections_to_host(const GpuDetection *,
+                                                 GpuDetection *, int,
+                                                 int *count, cudaStream_t) {
+  *count = 0;
+  return cudaSuccess;
+}
+
+#else // !MOCK_CUDA
+
 // CUDA Runtime
 #include <cuda_runtime.h>
 
@@ -54,6 +168,8 @@
 // Local CUDA kernels
 #include "cuda_preprocess.h"
 #include "gpu_postprocess.h" // GPU-native decode + NMS
+
+#endif // MOCK_CUDA
 
 // =============================================================================
 // CUDA Error Checking
