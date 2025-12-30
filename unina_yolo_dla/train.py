@@ -66,39 +66,74 @@ except ImportError:
 # 1. Custom DLA-Friendly Modules
 # ============================================================================
 
+# --- DLA Building Blocks (Duplicated from model.py for training script autonomy) ---
+
+class ConvBlock(nn.Module):
+    def __init__(self, c1, c2, k=3, s=1, p=None, g=1):
+        super().__init__()
+        self.conv = nn.Conv2d(c1, c2, k, s, p if p is not None else k//2, groups=g, bias=False)
+        self.bn = nn.BatchNorm2d(c2)
+        self.act = nn.ReLU(inplace=True)
+    def forward(self, x):
+        return self.act(self.bn(self.conv(x)))
+
+class Bottleneck(nn.Module):
+    def __init__(self, c1, c2, shortcut=True, g=1, e=0.5):
+        super().__init__()
+        c_ = int(c2 * e)
+        self.cv1 = ConvBlock(c1, c_, 1, 1)
+        self.cv2 = ConvBlock(c_, c2, 3, 1, g=g)
+        self.add = shortcut and c1 == c2
+    def forward(self, x):
+        return x + self.cv2(self.cv1(x)) if self.add else self.cv2(self.cv1(x))
+
+class C3k2(nn.Module):
+    def __init__(self, c1, c2, n=1, shortcut=False, e=0.5):
+        super().__init__()
+        c_ = int(c2 * e)
+        self.cv1 = ConvBlock(c1, c_, 1, 1)
+        self.cv2 = ConvBlock(c1, c_, 1, 1)
+        self.m = nn.Sequential(*(Bottleneck(c_, c_, shortcut, e=1.0) for _ in range(n)))
+        self.cv3 = ConvBlock(c_ * 2, c2, 1)
+    def forward(self, x):
+        return self.cv3(torch.cat((self.m(self.cv1(x)), self.cv2(x)), 1))
+
+class DetectionHead(nn.Module):
+    def __init__(self, c1, nc, ch=None):
+        super().__init__()
+        ch = ch or c1
+        self.cls = nn.Sequential(ConvBlock(c1, ch, 3), ConvBlock(ch, ch, 3), nn.Conv2d(ch, nc, 1))
+        self.reg = nn.Sequential(ConvBlock(c1, ch, 3), ConvBlock(ch, ch, 3), nn.Conv2d(ch, 4, 1))
+    def forward(self, x):
+        return self.cls(x), self.reg(x)
+
+class Upsample(nn.Module):
+    def __init__(self, scale_factor=2):
+        super().__init__()
+        self.f = scale_factor
+    def forward(self, x):
+        return nn.functional.interpolate(x, scale_factor=self.f, mode='nearest')
+
 class SPPF_DLA(nn.Module):
-    """
-    Spatial Pyramid Pooling - Fast (DLA Compatible Version).
-    
-    Avoids torch.chunk/split which cause GPU fallback on DLA.
-    Uses a sequence of MaxPool2d operations and a single concatenation.
-    
-    Reference: MORERESEARCH.md Section 3.3
-    """
-    def __init__(self, c1: int, c2: int, k: int = 5):
-        """
-        Args:
-            c1: Input channels.
-            c2: Output channels.
-            k: Kernel size for MaxPool (default 5).
-        """
+    def __init__(self, c1, c2, k=5):
         super().__init__()
         c_ = c1 // 2
-        self.cv1 = Conv(c1, c_, 1, 1)  # Reduce channels
-        self.cv2 = Conv(c_ * 4, c2, 1, 1)  # Combine + project
+        self.cv1 = ConvBlock(c1, c_, 1, 1)
+        self.cv2 = ConvBlock(c_ * 4, c2, 1, 1)
         self.m = nn.MaxPool2d(kernel_size=k, stride=1, padding=k // 2)
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+    def forward(self, x):
         x = self.cv1(x)
         y1 = self.m(x)
         y2 = self.m(y1)
         y3 = self.m(y2)
-        # Single efficient concatenation (DLA-friendly)
         return self.cv2(torch.cat((x, y1, y2, y3), 1))
-
 
 # Register custom module for Ultralytics YAML parsing
 if ULTRALYTICS_AVAILABLE:
+    setattr(ultralytics_modules, 'ConvBlock', ConvBlock)
+    setattr(ultralytics_modules, 'C3k2', C3k2)
+    setattr(ultralytics_modules, 'DetectionHead', DetectionHead)
+    setattr(ultralytics_modules, 'Upsample', Upsample)
     setattr(ultralytics_modules, 'SPPF_DLA', SPPF_DLA)
 
 
@@ -575,6 +610,8 @@ def train_phase1_fp32(
     """
     Phase 1: Train model in FP32 with ReLU activations.
     
+    Uses UninaDLATrainer to support Active Learning and registers mAP_small callback.
+    
     Returns:
         Path to best checkpoint.
     """
@@ -582,11 +619,9 @@ def train_phase1_fp32(
     print(">>> Phase 1: FP32 Training (Hardware-Aware)")
     print("=" * 60)
     
-    # Load model from YAML
-    model = YOLO(model_yaml)
-    
-    # Train with ReLU forced (if supported by version)
-    results = model.train(
+    # Define training arguments specifically for the Trainer class
+    args = dict(
+        model=model_yaml,
         data=data_yaml,
         epochs=epochs,
         imgsz=imgsz,
@@ -599,8 +634,41 @@ def train_phase1_fp32(
         amp=True,       # Mixed precision for speed
         verbose=True,
     )
-    
-    best_weights = Path(project) / name / "weights" / "best.pt"
+
+    if ULTRALYTICS_AVAILABLE:
+        try:
+            # Explicitly instantiate custom trainer
+            trainer = UninaDLATrainer(overrides=args)
+            
+            # Register Small Object Metric Callback
+            # note: Trainer typically sets self.validator internally during train()
+            # We can use method add_callback if available, roughly:
+            small_obj_cb = SmallObjectCallback(size_threshold=15, image_size=imgsz)
+            
+            # Registering callback to the trainer methods
+            # Ultralytics callbacks are dicts of functions usually, or added via add_callback
+            trainer.add_callback("on_val_start", small_obj_cb.on_val_start)
+            trainer.add_callback("on_val_batch_end", small_obj_cb.on_val_batch_end)
+            trainer.add_callback("on_val_end", small_obj_cb.on_val_end)
+            
+            print(">>> Custom Trainer and Callbacks Initialized.")
+            trainer.train()
+            
+            # Retrieve best weight path from trainer state
+            best_weights = trainer.best if hasattr(trainer, 'best') else Path(project) / name / "weights" / "best.pt"
+            
+        except Exception as e:
+            print(f"ERROR initializing custom trainer: {e}")
+            print("Falling back to standard YOLO.train()...")
+            # Fallback
+            model = YOLO(model_yaml)
+            model.train(**args)
+            best_weights = Path(project) / name / "weights" / "best.pt"
+            
+    else:
+        print("Ultralytics not available, cannot train.")
+        return ""
+
     print(f">>> Phase 1 Complete. Best weights: {best_weights}")
     
     return str(best_weights)

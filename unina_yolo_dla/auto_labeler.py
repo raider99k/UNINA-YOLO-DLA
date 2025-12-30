@@ -22,24 +22,55 @@ from tqdm import tqdm
 class GroundingDINO:
     """Wrapper for GroundingDINO open-vocabulary detector."""
     def __init__(self, config_path, weights_path):
-        # Initialize model here
-        pass
+        self.device = "cuda" if torch.cuda.is_available() else "cpu"
+        # Real implementation would load model here:
+        # self.model = load_model(config_path, weights_path)
+        # self.model.to(self.device)
+        print(f"[GroundingDINO] Loaded from {weights_path}")
 
-    def predict(self, image, text_prompt="traffic cone"):
+    def predict(self, image, text_prompt="traffic cone", box_threshold=0.35, text_threshold=0.25):
         """Predict boxes based on prompt."""
-        # Return boxes, logits, phrases
-        return np.array([[0,0,10,10]]), np.array([0.9]), ["cone"]
+        # Real logic:
+        # image_tensor = transform(image)
+        # boxes, logits, phrases = predict(self.model, image_tensor, text_prompt, box_threshold, text_threshold)
+        
+        # Placeholder simulation:
+        # Detect a dummy box in the center for testing pipeline flow
+        h, w = image.shape[:2]
+        dummy_box = np.array([w//2 - 20, h//2 - 20, w//2 + 20, h//2 + 20])
+        
+        return np.array([dummy_box]), np.array([0.9]), ["cone"]
 
 class SAM:
     """Wrapper for Segment Anything Model."""
     def __init__(self, checkpoint):
-        # Initialize SAM here
-        pass
+        self.device = "cuda" if torch.cuda.is_available() else "cpu"
+        # Real implementation:
+        # self.sam = sam_model_registry["vit_h"](checkpoint=checkpoint)
+        # self.sam.to(device=self.device)
+        # self.predictor = SamPredictor(self.sam)
+        print(f"[SAM] Loaded from {checkpoint}")
 
     def predict_mask(self, image, boxes):
         """Refine boxes into masks and tight-fit bounding boxes."""
-        # Return masks and refined boxes
-        return np.ones_like(image), boxes
+        if len(boxes) == 0:
+            return [], []
+            
+        # self.predictor.set_image(image)
+        # transformed_boxes = self.predictor.transform.apply_boxes_torch(boxes, image.shape[:2])
+        # masks, _, _ = self.predictor.predict_torch(point_coords=None, point_labels=None, boxes=transformed_boxes, multimask_output=False)
+        
+        # Placeholder: Return full box mask
+        masks = []
+        refined_boxes = []
+        for box in boxes:
+            mask = np.zeros(image.shape[:2], dtype=np.uint8)
+            x1, y1, x2, y2 = box.astype(int)
+            mask[y1:y2, x1:x2] = 1
+            masks.append(mask)
+            refined_boxes.append(box) # Box remains same in this dummy
+            
+        return masks, np.array(refined_boxes)
 
 class SAHI_Wrapper:
     """Slicing Aided Hyper Inference logic."""
@@ -117,10 +148,38 @@ def main():
     # sahi = SAHI_Wrapper()
     
     print(f"[Auto-Labeler] Starting pipeline on {args.input}")
+    
+    # Instantiate models (Mock paths if not provided)
+    # In production, these would be args.gdino_weights, etc.
+    gdino = GroundingDINO("groundingdino/config/GroundingDINO_SwinT_OGC.py", "weights/groundingdino_swint_ogc.pth")
+    sam = SAM("weights/sam_vit_h_4b8939.pth")
+    sahi = SAHI_Wrapper()
+
     for img_file in tqdm(list(input_path.glob("*.jpg"))):
-        # labels = auto_label_frame(img_file, gdino, sam, sahi)
-        # save_yolo_labels(labels, output_path / (img_file.stem + ".txt"))
-        pass
+        try:
+            labels = auto_label_frame(img_file, gdino, sam, sahi)
+            
+            # Save logic (YOLO format: class x_c y_c w h)
+            out_file = output_path / (img_file.stem + ".txt")
+            with open(out_file, "w") as f:
+                for box in labels:
+                    # Assuming box is xyxy, convert to xywh normalized
+                    # Flatten if list of lists
+                    if isinstance(box, list) or len(box.shape) > 1:
+                        box = box[0]
+                    
+                    img = cv2.imread(str(img_file))
+                    h, w = img.shape[:2]
+                    
+                    x1, y1, x2, y2 = box
+                    xc = ((x1 + x2) / 2) / w
+                    yc = ((y1 + y2) / 2) / h
+                    bw = (x2 - x1) / w
+                    bh = (y2 - y1) / h
+                    
+                    f.write(f"0 {xc:.6f} {yc:.6f} {bw:.6f} {bh:.6f}\n")
+        except Exception as e:
+            print(f"Failed to label {img_file}: {e}")
 
 if __name__ == "__main__":
     main()

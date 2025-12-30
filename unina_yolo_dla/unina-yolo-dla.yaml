@@ -29,7 +29,7 @@ backbone:
   
   # Stage 1 -> P2 output
   - [-1, 1, ConvBlock, [64, 3, 2]]           # 1: P2/4 (160x160)
-  - [-1, 1, C3k2, [64, 1, True]]             # 2: P2 features
+  - [-1, 1, ConvBlock, [64, 3, 1]]           # 2: P2 features (Lite - CBUF friendly)
   
   # Stage 2 -> P3 output
   - [-1, 1, ConvBlock, [128, 3, 2]]          # 3: P3/8 (80x80)
