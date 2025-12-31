@@ -76,6 +76,12 @@ class SPPF_DLA(nn.Module):
     """
     def __init__(self, c1, c2, k=5):
         super().__init__()
+        # Robustness fix: If c2 matches k (e.g. 5) and is very small, assume args were shifted
+        # and c2 was meant to be c1 (or similar).
+        if c2 == k and c2 < 16:
+            print(f"WARNING: SPPF_DLA detected arg shift (c2={c2}). Forcing c2=c1={c1}.")
+            c2 = c1
+            
         c_ = c1 // 2
         self.cv1 = Conv(c1, c_, 1, 1)
         self.cv2 = Conv(c_ * 4, c2, 1, 1)
