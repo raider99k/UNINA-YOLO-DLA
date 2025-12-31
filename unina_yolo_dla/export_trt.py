@@ -153,10 +153,11 @@ class ConeCalibrationStream:
         )
         
         if len(self.image_paths) == 0:
-            print(f"WARNING: No images found in {self.calib_folder}")
-        else:
-            print(f"[ConeCalibrationStream] Found {len(self.image_paths)} images")
-            print(f"[ConeCalibrationStream] Using mean={mean}, std={std}")
+            raise FileNotFoundError(f"FATAL: No calibration images found in {self.calib_folder}. "
+                                    "Production-ready engines require real calibration data.")
+        
+        print(f"[ConeCalibrationStream] Found {len(self.image_paths)} images")
+        print(f"[ConeCalibrationStream] Using mean={mean}, std={std}")
     
     def _load_and_preprocess(self, image_path: str) -> np.ndarray:
         """
@@ -171,12 +172,8 @@ class ConeCalibrationStream:
             img = Image.open(image_path).convert('RGB')
             img = img.resize((self.input_size, self.input_size))
             img_np = np.array(img, dtype=np.float32)
-        except ImportError:
-            # Fallback to random data if PIL not available
-            img_np = np.random.rand(self.input_size, self.input_size, 3).astype(np.float32) * 255
-        except Exception as e:
-            print(f"Error loading {image_path}: {e}")
-            return np.zeros((3, self.input_size, self.input_size), dtype=np.float32)
+        except (ImportError, Exception) as e:
+            raise RuntimeError(f"FATAL: Failed to load calibration image {image_path}: {e}")
         
         # HWC -> CHW
         img_np = img_np.transpose(2, 0, 1)
@@ -313,12 +310,20 @@ def analyze_engine_layers(engine_path: str | Path) -> tuple[int, int, list[str]]
                 info = json.loads(layer_info)
                 layer_name = info.get("Name", f"layer_{i}")
                 device = info.get("Device", "GPU")
+                precision = info.get("Precision", "FP32")
                 
                 if "DLA" in device.upper():
                     dla_count += 1
                 else:
                     gpu_count += 1
                     gpu_layers.append(layer_name)
+                
+                # Check for P2 layers ending up in INT8 (CRITICAL FOR SMALL OBJECTS)
+                if "p2" in layer_name.lower() and "int8" in precision.lower():
+                    print(f"{Colors.YELLOW}WARNING: P2 layer '{layer_name}' is quantized to INT8!{Colors.RESET}")
+                    print(f"{Colors.YELLOW}This may degrade small object detection accuracy. "
+                          f"Consider keeping P2 layers in FP16.{Colors.RESET}")
+                    
     except Exception as e:
         print(f"Note: Could not analyze individual layers ({e})")
         # Fallback: check engine-level DLA status
@@ -373,6 +378,7 @@ def build_trt_engine(
     precision: str = "int8",  # "fp16" or "int8"
     dla_core: int = 0,
     allow_gpu_fallback: bool = True,  # Enable for build, check after
+    strict_dla: bool = True,          # Enforce 0% GPU fallback
     workspace_size_gb: float = 2.0,
 ) -> Path | None:
     """
@@ -469,9 +475,19 @@ def build_trt_engine(
     is_pure_dla = print_fallback_report(dla_count, gpu_count, gpu_layers)
     
     if not is_pure_dla:
-        print(f"\n{Colors.RED}{Colors.BOLD}⛔ BLOCKING ERROR: Engine has GPU fallback.{Colors.RESET}")
-        print(f"{Colors.RED}Objective was 100% DLA. Fix the model architecture.{Colors.RESET}\n")
-        # Note: We still return the engine path, but the error is clearly printed.
+        if strict_dla:
+            error_msg = (
+                f"\n{Colors.RED}{Colors.BOLD}FATAL: Strict DLA enforcement failed!{Colors.RESET}\n"
+                f"The following layers fell back to GPU:\n"
+            )
+            for layer in gpu_layers:
+                error_msg += f"- {layer}\n"
+            error_msg += "Modify the model architecture to use DLA-supported operations."
+            raise RuntimeError(error_msg)
+        else:
+            print(f"\n{Colors.RED}{Colors.BOLD}⛔ BLOCKING ERROR: Engine has GPU fallback.{Colors.RESET}")
+            print(f"{Colors.RED}Objective was 100% DLA. Fix the model architecture.{Colors.RESET}\n")
+            # Note: We still return the engine path if strict_dla is False, but print error
     
     return engine_path
 
@@ -485,6 +501,7 @@ def export_pipeline(
     precision: str = "int8",
     dla_core: int = 1,  # Default to DLA Core 1 (Core 0 reserved for other tasks)
     input_size: int = 640,
+    strict_dla: bool = True,
     num_calib_images: int = 50,
 ) -> Path | None:
     """
@@ -516,30 +533,22 @@ def export_pipeline(
     calibrator = None
     if precision == "int8":
         if calib_folder is None:
-            print(f"WARNING: No calib_folder provided. Using dummy data (NOT for production).")
-            # Create a dummy stream with random data
-            class DummyStream:
-                def __init__(self):
-                    self.batch_size = 1
-                    self.count = 0
-                    self.max_count = 10
-                def get_batch(self):
-                    if self.count >= self.max_count:
-                        return None
-                    self.count += 1
-                    return np.random.randn(1, 3, input_size, input_size).astype(np.float32)
-                def reset(self):
-                    self.count = 0
-            stream = DummyStream()
-        else:
-            calib_folder = Path(calib_folder)
-            if not calib_folder.exists():
-                print(f"ERROR: Calibration folder not found: {calib_folder}")
-                return None
-            stream = ConeCalibrationStream(calib_folder, input_size=input_size)
-            if len(stream.image_paths) < num_calib_images:
-                print(f"WARNING: Only {len(stream.image_paths)} images in {calib_folder}. "
-                      f"Recommended: {num_calib_images}+")
+            raise ValueError(
+                "FATAL: No 'calib_folder' provided for INT8 export. "
+                "Dummy data is prohibited for production deployment."
+            )
+        
+        calib_folder = Path(calib_folder)
+        if not calib_folder.exists():
+            raise FileNotFoundError(f"FATAL: Calibration folder not found: {calib_folder}")
+            
+        stream = ConeCalibrationStream(calib_folder, input_size=input_size)
+        
+        if len(stream.image_paths) < num_calib_images:
+            raise RuntimeError(
+                f"FATAL: Insufficient calibration data. Found {len(stream.image_paths)} images, "
+                f"but {num_calib_images} are required for production calibration."
+            )
         
         calibrator = EntropyCalibrator(stream, cache_file=cache_path)
 
@@ -549,7 +558,9 @@ def export_pipeline(
         calibrator=calibrator,
         precision=precision,
         dla_core=dla_core,
+        dla_core=dla_core,
         allow_gpu_fallback=True,  # Allow for build, verify after
+        strict_dla=strict_dla,
     )
 
     return engine_path

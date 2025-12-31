@@ -28,7 +28,6 @@
 #include <rclcpp/rclcpp.hpp>
 #include <rclcpp_lifecycle/lifecycle_node.hpp>
 #include <rclcpp_lifecycle/lifecycle_publisher.hpp>
-#include <sensor_msgs/msg/image.hpp>
 #include <vision_msgs/msg/detection2_d_array.hpp>
 
 // Custom zero-copy message
@@ -126,6 +125,8 @@ struct GpuDetection {
   int _pad;
 };
 #define MAX_DETECTIONS 1024
+inline cudaError_t init_postprocess_resources() { return cudaSuccess; }
+inline cudaError_t cleanup_postprocess_resources() { return cudaSuccess; }
 inline cudaError_t reset_detection_counter(cudaStream_t) { return cudaSuccess; }
 inline cudaError_t get_detection_count(int *count, cudaStream_t) {
   *count = 0;
@@ -461,6 +462,9 @@ public:
         allocate_preprocess_buffer(input_width_, input_height_);
     allocate_detection_buffers();
 
+    // --- Initialize Post-Process Resources (Zero-Allocation) ---
+    CUDA_CHECK(init_postprocess_resources());
+
     // --- GPU Detection Buffer (for GPU-native postprocess) ---
     CUDA_CHECK(
         cudaMalloc(&d_detections_, MAX_DETECTIONS * sizeof(GpuDetection)));
@@ -569,6 +573,16 @@ public:
       return;
     }
 
+    // MEMORY ALIGNMENT GUARD (HPC Phase 2)
+    // DLA and efficient CUDA vector loads require aligned pitch.
+    if (buffer.pitch % 256 != 0) {
+      RCLCPP_ERROR_THROTTLE(this->get_logger(), *this->get_clock(), 1000,
+                            "FATAL: Invalid pitch alignment (%d)! Must be "
+                            "256-byte aligned for DLA/CUDA efficiency.",
+                            buffer.pitch);
+      return;
+    }
+
     auto start_time = std::chrono::steady_clock::now();
 
     // --- Step 1: Preprocess (GPU-to-GPU) ---
@@ -660,41 +674,6 @@ public:
     RCLCPP_DEBUG(this->get_logger(), "Latency: %.2f ms", latency_us / 1000.0);
   }
 
-  // =========================================================================
-  // DEPRECATED: sensor_msgs::Image path (CPU copy - for testing only)
-  // =========================================================================
-
-  /**
-   * @brief DEPRECATED: Process sensor_msgs::Image (uses CPU copy).
-   *
-   * WARNING: This path copies the entire image from CPU to GPU.
-   * Use processGpuBuffer() for production.
-   */
-  [[deprecated("Use processGpuBuffer for zero-copy")]]
-  void processImage(const sensor_msgs::msg::Image::SharedPtr msg) {
-    RCLCPP_WARN_ONCE(this->get_logger(),
-                     "Using DEPRECATED imageCallback. This is NOT zero-copy. "
-                     "Integrate with ZED SDK for production.");
-
-    // CPU -> GPU copy (NOT ZERO-COPY)
-    size_t input_size = msg->step * msg->height;
-    uint8_t *d_input = nullptr;
-    cudaMalloc(&d_input, input_size);
-    cudaMemcpyAsync(d_input, msg->data.data(), input_size,
-                    cudaMemcpyHostToDevice, cuda_stream_);
-
-    GpuBufferHandle buffer;
-    buffer.device_ptr = d_input;
-    buffer.width = msg->width;
-    buffer.height = msg->height;
-    buffer.pitch = msg->step;
-    buffer.timestamp_ns = rclcpp::Time(msg->header.stamp).nanoseconds();
-
-    processGpuBuffer(buffer, buffer.timestamp_ns);
-
-    cudaFree(d_input);
-  }
-
 private:
   // =========================================================================
   // Resource Management
@@ -715,6 +694,7 @@ private:
 
   void cleanup_resources() {
     engine_->unload();
+    cleanup_postprocess_resources();
 
     if (cuda_stream_) {
       destroy_preprocess_stream(cuda_stream_);

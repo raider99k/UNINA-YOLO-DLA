@@ -2,6 +2,8 @@
  * UNINA-YOLO-DLA: GPU Post-Processing Header
  *
  * Provides C++ interface for GPU-native YOLO decoding and NMS.
+ * Uses workspace-allocated counter (multi-stream safe) and CUB stream
+ * compaction.
  */
 
 #ifndef GPU_POSTPROCESS_H
@@ -33,6 +35,16 @@ struct __align__(32) GpuDetection {
 #ifdef __cplusplus
 extern "C" {
 #endif
+
+/**
+ * @brief Initializes GPU resources for post-processing (One-time allocation)
+ */
+cudaError_t init_postprocess_resources();
+
+/**
+ * @brief Frees GPU resources
+ */
+cudaError_t cleanup_postprocess_resources();
 
 /**
  * @brief Resets the atomic detection counter (call before each frame)

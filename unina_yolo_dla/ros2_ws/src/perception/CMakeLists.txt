@@ -36,7 +36,9 @@ if(CUDA_FOUND)
   enable_language(CUDA)
   include_directories(${CUDA_INCLUDE_DIRS})
 else()
-  message(WARNING "CUDA not found. Building without CUDA support.")
+  message(WARNING "CUDA not found. Building with MOCK_CUDA stubs for CI/testing.")
+  # Define MOCK_CUDA to enable stub implementations in perception_node.cpp
+  add_definitions(-DMOCK_CUDA)
 endif()
 
 # TensorRT (for inference)

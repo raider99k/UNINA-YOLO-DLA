@@ -68,59 +68,19 @@ except ImportError:
 
 # --- DLA Building Blocks (Duplicated from model.py for training script autonomy) ---
 
-class ConvBlock(nn.Module):
-    def __init__(self, c1, c2, k=3, s=1, p=None, g=1):
-        super().__init__()
-        self.conv = nn.Conv2d(c1, c2, k, s, p if p is not None else k//2, groups=g, bias=False)
-        self.bn = nn.BatchNorm2d(c2)
-        self.act = nn.ReLU(inplace=True)
-    def forward(self, x):
-        return self.act(self.bn(self.conv(x)))
-
-class Bottleneck(nn.Module):
-    def __init__(self, c1, c2, shortcut=True, g=1, e=0.5):
-        super().__init__()
-        c_ = int(c2 * e)
-        self.cv1 = ConvBlock(c1, c_, 1, 1)
-        self.cv2 = ConvBlock(c_, c2, 3, 1, g=g)
-        self.add = shortcut and c1 == c2
-    def forward(self, x):
-        return x + self.cv2(self.cv1(x)) if self.add else self.cv2(self.cv1(x))
-
-class C3k2(nn.Module):
-    def __init__(self, c1, c2, n=1, shortcut=False, e=0.5):
-        super().__init__()
-        c_ = int(c2 * e)
-        self.cv1 = ConvBlock(c1, c_, 1, 1)
-        self.cv2 = ConvBlock(c1, c_, 1, 1)
-        self.m = nn.Sequential(*(Bottleneck(c_, c_, shortcut, e=1.0) for _ in range(n)))
-        self.cv3 = ConvBlock(c_ * 2, c2, 1)
-    def forward(self, x):
-        return self.cv3(torch.cat((self.m(self.cv1(x)), self.cv2(x)), 1))
-
-class DetectionHead(nn.Module):
-    def __init__(self, c1, nc, ch=None):
-        super().__init__()
-        ch = ch or c1
-        self.cls = nn.Sequential(ConvBlock(c1, ch, 3), ConvBlock(ch, ch, 3), nn.Conv2d(ch, nc, 1))
-        self.reg = nn.Sequential(ConvBlock(c1, ch, 3), ConvBlock(ch, ch, 3), nn.Conv2d(ch, 4, 1))
-    def forward(self, x):
-        return self.cls(x), self.reg(x)
-
-class Upsample(nn.Module):
-    def __init__(self, scale_factor=2):
-        super().__init__()
-        self.f = scale_factor
-    def forward(self, x):
-        return nn.functional.interpolate(x, scale_factor=self.f, mode='nearest')
-
 class SPPF_DLA(nn.Module):
+    """
+    Sostituzione SPPF ottimizzata per DLA.
+    Evita torch.chunk/split che causano fallback su DLA.
+    Usa sequenza di MaxPool2d e una singola concatenazione finale.
+    """
     def __init__(self, c1, c2, k=5):
         super().__init__()
         c_ = c1 // 2
-        self.cv1 = ConvBlock(c1, c_, 1, 1)
-        self.cv2 = ConvBlock(c_ * 4, c2, 1, 1)
+        self.cv1 = Conv(c1, c_, 1, 1)
+        self.cv2 = Conv(c_ * 4, c2, 1, 1)
         self.m = nn.MaxPool2d(kernel_size=k, stride=1, padding=k // 2)
+
     def forward(self, x):
         x = self.cv1(x)
         y1 = self.m(x)
@@ -130,11 +90,16 @@ class SPPF_DLA(nn.Module):
 
 # Register custom module for Ultralytics YAML parsing
 if ULTRALYTICS_AVAILABLE:
-    setattr(ultralytics_modules, 'ConvBlock', ConvBlock)
-    setattr(ultralytics_modules, 'C3k2', C3k2)
-    setattr(ultralytics_modules, 'DetectionHead', DetectionHead)
-    setattr(ultralytics_modules, 'Upsample', Upsample)
+    # Register in ultralytics.nn.modules
     setattr(ultralytics_modules, 'SPPF_DLA', SPPF_DLA)
+    
+    # CRITICAL: Also register in ultralytics.nn.tasks where parse_model uses globals()
+    try:
+        import ultralytics.nn.tasks as ultralytics_tasks
+        setattr(ultralytics_tasks, 'SPPF_DLA', SPPF_DLA)
+        ultralytics_tasks.__dict__['SPPF_DLA'] = SPPF_DLA
+    except ImportError:
+        print("WARNING: Could not register modules in ultralytics.nn.tasks")
 
 
 # ============================================================================
@@ -174,6 +139,168 @@ def prepare_qat_model(model: nn.Module) -> nn.Module:
     return model
 
 
+def transfer_weights_fp32_to_qat(
+    fp32_model: nn.Module,
+    qat_model: nn.Module,
+    strict: bool = False,
+) -> dict[str, list[str]]:
+    """
+    Transfers weights from an FP32 model to a QAT model with intelligent layer matching.
+    
+    Handles the structural differences between standard PyTorch models and
+    pytorch-quantization wrapped models (Conv2d -> QuantConv2d, etc.).
+    
+    Args:
+        fp32_model: Source model with FP32 weights.
+        qat_model: Target QAT model.
+        strict: If True, raise error on any mismatch. If False, skip mismatches.
+    
+    Returns:
+        Dictionary with keys 'transferred', 'skipped', 'mismatched' listing layer names.
+    
+    Raises:
+        RuntimeError: If strict=True and there are mismatches.
+    """
+    fp32_state = fp32_model.state_dict()
+    qat_state = qat_model.state_dict()
+    
+    result = {
+        "transferred": [],
+        "skipped": [],
+        "mismatched": [],
+    }
+    
+    # Build a normalized name mapping for QAT model
+    # QuantConv2d wraps the conv layer, so paths might differ
+    qat_name_map: dict[str, str] = {}
+    for qat_name in qat_state.keys():
+        # Create normalized versions of the name for matching
+        # Remove common QAT prefixes/suffixes
+        normalized = qat_name
+        for pattern in [".conv.", "._input_quantizer.", "._weight_quantizer."]:
+            normalized = normalized.replace(pattern, ".")
+        normalized = normalized.replace("..", ".")
+        qat_name_map[normalized] = qat_name
+        qat_name_map[qat_name] = qat_name  # Also keep original
+    
+    # Track which QAT parameters have been set
+    transferred_qat_params: set[str] = set()
+    
+    print("\n>>> FP32 -> QAT Weight Transfer")
+    print("=" * 50)
+    
+    for fp32_name, fp32_param in fp32_state.items():
+        matched = False
+        
+        # Strategy 1: Direct name match
+        if fp32_name in qat_state:
+            if qat_state[fp32_name].shape == fp32_param.shape:
+                qat_state[fp32_name].copy_(fp32_param)
+                result["transferred"].append(fp32_name)
+                transferred_qat_params.add(fp32_name)
+                matched = True
+            else:
+                result["mismatched"].append(
+                    f"{fp32_name}: FP32 {fp32_param.shape} != QAT {qat_state[fp32_name].shape}"
+                )
+                matched = True  # Matched but incompatible
+        
+        # Strategy 2: Normalized name match (for QuantConv2d wrappers)
+        if not matched:
+            for qat_name in qat_state.keys():
+                if qat_name in transferred_qat_params:
+                    continue
+                    
+                # Check if the core parameter name matches
+                # FP32: backbone.stem.conv.weight
+                # QAT:  backbone.stem.conv.weight  (same, or with quant wrappers)
+                fp32_base = fp32_name.rsplit(".", 1)[-1]  # e.g., "weight" or "bias"
+                qat_base = qat_name.rsplit(".", 1)[-1]
+                
+                if fp32_base != qat_base:
+                    continue
+                
+                # Compare the structural path (without the final param name)
+                fp32_path = fp32_name.rsplit(".", 1)[0] if "." in fp32_name else ""
+                qat_path = qat_name.rsplit(".", 1)[0] if "." in qat_name else ""
+                
+                # Normalize paths for comparison
+                fp32_path_norm = fp32_path.replace("module.", "")
+                qat_path_norm = qat_path.replace("module.", "")
+                
+                # Check for structural similarity
+                if _paths_match(fp32_path_norm, qat_path_norm):
+                    if qat_state[qat_name].shape == fp32_param.shape:
+                        qat_state[qat_name].copy_(fp32_param)
+                        result["transferred"].append(f"{fp32_name} -> {qat_name}")
+                        transferred_qat_params.add(qat_name)
+                        matched = True
+                        break
+                    else:
+                        result["mismatched"].append(
+                            f"{fp32_name} ~> {qat_name}: {fp32_param.shape} != {qat_state[qat_name].shape}"
+                        )
+        
+        if not matched:
+            result["skipped"].append(fp32_name)
+    
+    # Load the modified state dict into QAT model
+    qat_model.load_state_dict(qat_state, strict=False)
+    
+    # Print summary
+    print(f"  Transferred: {len(result['transferred'])} parameters")
+    print(f"  Skipped:     {len(result['skipped'])} parameters")
+    print(f"  Mismatched:  {len(result['mismatched'])} parameters")
+    
+    if result["mismatched"]:
+        print("\n>>> SHAPE MISMATCHES:")
+        for m in result["mismatched"][:10]:
+            print(f"    {m}")
+        if len(result["mismatched"]) > 10:
+            print(f"    ... and {len(result['mismatched']) - 10} more")
+    
+    if result["skipped"] and len(result["skipped"]) <= 20:
+        print("\n>>> SKIPPED (no match found):")
+        for s in result["skipped"]:
+            print(f"    {s}")
+    elif result["skipped"]:
+        print(f"\n>>> SKIPPED: {len(result['skipped'])} parameters (too many to list)")
+    
+    if strict and (result["mismatched"] or result["skipped"]):
+        raise RuntimeError(
+            f"Strict weight transfer failed: {len(result['mismatched'])} mismatches, "
+            f"{len(result['skipped'])} skipped."
+        )
+    
+    return result
+
+
+def _paths_match(fp32_path: str, qat_path: str) -> bool:
+    """
+    Check if two module paths refer to the same logical layer.
+    
+    Handles differences like:
+    - 'backbone.stem.conv' vs 'backbone.stem.conv'
+    - 'stem.0.conv' vs 'stem.conv'
+    - 'layer1.conv' vs 'layer1.0.conv'
+    """
+    if fp32_path == qat_path:
+        return True
+    
+    # Split into components
+    fp32_parts = [p for p in fp32_path.split(".") if p]
+    qat_parts = [p for p in qat_path.split(".") if p]
+    
+    # Remove numeric indices for comparison
+    def strip_indices(parts: list[str]) -> list[str]:
+        return [p for p in parts if not p.isdigit()]
+    
+    fp32_stripped = strip_indices(fp32_parts)
+    qat_stripped = strip_indices(qat_parts)
+    
+    return fp32_stripped == qat_stripped
+
+
 def configure_entropy_calibration() -> None:
     """
     Configure pytorch-quantization to use Entropy calibration.
@@ -205,6 +332,9 @@ def set_layer_precision_fp16(model: nn.Module, layer_names: list) -> None:
     The P2 head and initial backbone layers should remain in FP16
     to preserve small object detection capability.
     
+    CRITICAL: This function disables ALL quantizers (input, weight, and output)
+    to prevent quantization loss for small, low-contrast features.
+    
     Reference: RESEARCH.md Section 4.2 (Layer-Wise Mixed Precision)
     
     Args:
@@ -217,17 +347,25 @@ def set_layer_precision_fp16(model: nn.Module, layer_names: list) -> None:
     from pytorch_quantization.nn.modules import tensor_quantizer
     
     print(f">>> Setting FP16 precision for sensitive layers: {layer_names}")
+    disabled_count = 0
     for name, module in model.named_modules():
         # Check if this layer matches any of the patterns
         for pattern in layer_names:
             if pattern in name:
-                # Disable quantization for this layer (keep FP16)
-                if hasattr(module, '_input_quantizer'):
+                # Disable ALL quantizers for this layer (keep FP16)
+                if hasattr(module, '_input_quantizer') and module._input_quantizer is not None:
                     module._input_quantizer.disable()
-                if hasattr(module, '_weight_quantizer'):
+                    disabled_count += 1
+                if hasattr(module, '_weight_quantizer') and module._weight_quantizer is not None:
                     module._weight_quantizer.disable()
-                print(f"    Disabled quantization for: {name}")
+                    disabled_count += 1
+                if hasattr(module, '_output_quantizer') and module._output_quantizer is not None:
+                    module._output_quantizer.disable()
+                    disabled_count += 1
+                print(f"    Disabled quantization for: {name} (all quantizers)")
                 break
+    
+    print(f">>> Total quantizers disabled for FP16 preservation: {disabled_count}")
 
 
 # ============================================================================
@@ -259,10 +397,12 @@ if ULTRALYTICS_AVAILABLE:
             """
             Load model from YAML config, injecting custom modules.
             """
+            # Use getattr for rank compatibility with different Ultralytics versions
+            rank = getattr(self, 'rank', -1)
             model = DetectionModel(
                 cfg, 
                 nc=self.data['nc'], 
-                verbose=verbose and self.rank == -1
+                verbose=verbose and rank == -1
             )
             
             if weights:
@@ -528,18 +668,17 @@ def calibrate_conformal_prediction(
     print(f"    Matched pairs: {total_matches}")
     
     # Calculate the (1 - alpha) quantile of nonconformity scores
-    if len(nonconformity_scores) > 0:
-        scores_array = np.array(nonconformity_scores)
-        q_hat = float(np.quantile(scores_array, 1 - alpha))
-        mean_score = float(np.mean(scores_array))
-        std_score = float(np.std(scores_array))
-        note = "Calibrated from empirical nonconformity score distribution (1-IoU)."
-    else:
-        print(">>> WARNING: No matched predictions found. Using fallback heuristic.")
-        q_hat = 0.15  # Conservative fallback
-        mean_score = 0.0
-        std_score = 0.0
-        note = "Fallback value used (no matched predictions during calibration)."
+    if len(nonconformity_scores) == 0:
+        raise ValueError(
+            "FATAL: Conformal Prediction Calibration failed: No matched predictions found. "
+            "Ensure the validation dataset is representative and the model is generating detections."
+        )
+        
+    scores_array = np.array(nonconformity_scores)
+    q_hat = float(np.quantile(scores_array, 1 - alpha))
+    mean_score = float(np.mean(scores_array))
+    std_score = float(np.std(scores_array))
+    note = "Calibrated from empirical nonconformity score distribution (1-IoU)."
     
     calibration_result = {
         "alpha": alpha,
@@ -711,14 +850,34 @@ def train_phase2_qat(
     quant_modules.initialize()
     
     # Load model with quantized layers
-    model = YOLO(model_yaml)
+    qat_model = YOLO(model_yaml)
     
-    # Transfer FP32 weights
+    # Load original FP32 model for weight extraction
     print(f">>> Loading FP32 weights from: {fp32_weights}")
+    fp32_model = YOLO(model_yaml)
     try:
-        model.load(fp32_weights)
+        fp32_model.load(fp32_weights)
     except Exception as e:
-        print(f">>> Direct loading failed ({e}). Weights may need manual mapping.")
+        print(f">>> WARNING: Could not load FP32 weights ({e}). Using random init.")
+        fp32_model = None
+    
+    # Transfer weights using intelligent matching
+    if fp32_model is not None and hasattr(fp32_model, 'model') and hasattr(qat_model, 'model'):
+        transfer_result = transfer_weights_fp32_to_qat(
+            fp32_model.model, 
+            qat_model.model,
+            strict=False
+        )
+        print(f">>> Weight transfer complete: {len(transfer_result['transferred'])} transferred")
+    else:
+        print(">>> Fallback: Using direct weight loading")
+        try:
+            qat_model.load(fp32_weights)
+        except Exception as e:
+            print(f">>> Direct loading failed ({e}). Proceeding with random init.")
+    
+    # Use qat_model going forward
+    model = qat_model
     
     # Set layer-wise precision: Keep P2 head and first backbone layers in FP16
     # (RESEARCH.md Section 4.2 - Mixed Precision Layer-Wise)
@@ -808,7 +967,7 @@ def main():
     parser.add_argument('--qat-epochs', type=int, default=20, help="QAT fine-tuning epochs")
     parser.add_argument('--batch', type=int, default=16, help="Batch size")
     parser.add_argument('--imgsz', type=int, default=640, help="Image size")
-    parser.add_argument('--device', type=int, default=0, help="GPU device ID")
+    parser.add_argument('--device', type=str, default='0', help="Device: GPU ID (0,1) or 'cpu'")
     
     # Output
     parser.add_argument('--project', type=str, default='runs/unina_dla', help="Project directory")
