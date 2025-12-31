@@ -197,11 +197,10 @@ class Backbone(nn.Module):
         self.stage3_conv = ConvBlock(c3, c4, kernel_size=3, stride=2)
         self.stage3_c3k2 = C3k2(c4, c4, n=2)
         
-        # Stage 4: (c4, 40, 40) -> (c5, 20, 20) = For SPPF context (NOT P5 Head)
-        self.stage4_conv = ConvBlock(c4, c5, kernel_size=3, stride=2)
-        self.stage4_sppf = SPPF_DLA(c5, c5)
+        # SPPF context on top of P4 (matching YAML layer 7)
+        self.sppf = SPPF_DLA(c4, c4)
         
-        self.out_channels = [c2, c3, c4, c5]
+        self.out_channels = [c2, c3, c4]
 
     def forward(self, x: torch.Tensor) -> tuple[torch.Tensor, ...]:
         x = self.stem(x)
@@ -215,10 +214,9 @@ class Backbone(nn.Module):
         x = self.stage3_conv(p3)
         p4 = self.stage3_c3k2(x)  # Output: stride 16, 40x40
         
-        x = self.stage4_conv(p4)
-        p5_sppf = self.stage4_sppf(x) # Contextual features, not for P5 head
+        p4_sppf = self.sppf(p4) # Contextual features at P4 stride
 
-        return p2, p3, p4, p5_sppf
+        return p2, p3, p4, p4_sppf
 
 
 # --- Neck (PANet-style) ---
@@ -230,20 +228,17 @@ class Neck(nn.Module):
     """
     def __init__(self, in_channels: list[int]) -> None:
         super().__init__()
-        c2, c3, c4, c5 = in_channels
+        c2, c3, c4 = in_channels
 
         # Top-Down (FPN-like) Pathway
-        self.up1 = Upsample(scale_factor=2) # c5 -> 40x40
-        self.lateral_p4 = ConvBlock(c5, c4, kernel_size=1)
-        self.fpn_c3k2_1 = C3k2(c4 * 2, c4, n=1)
-
-        self.up2 = Upsample(scale_factor=2) # c4 -> 80x80
+        # Starts from SPPF at P4 (c4) and goes up to P3(c3) then P2(c2)
+        self.up1 = Upsample(scale_factor=2) # P4 -> 80x80
         self.lateral_p3 = ConvBlock(c4, c3, kernel_size=1)
-        self.fpn_c3k2_2 = C3k2(c3 * 2, c3, n=1)
-        
-        self.up3 = Upsample(scale_factor=2) # c3 -> 160x160
+        self.fpn_c3k2_1 = C3k2(c3 * 2, c3, n=1)
+
+        self.up2 = Upsample(scale_factor=2) # P3 -> 160x160
         self.lateral_p2 = ConvBlock(c3, c2, kernel_size=1)
-        self.fpn_c3k2_3 = C3k2(c2 * 2, c2, n=1)
+        self.fpn_c3k2_2 = C3k2(c2 * 2, c2, n=1)
 
         # Bottom-Up (PAN-like) Pathway
         self.down1 = ConvBlock(c2, c2, kernel_size=3, stride=2) # 160->80
@@ -255,24 +250,21 @@ class Neck(nn.Module):
         self.out_channels = [c2, c3, c4]
 
     def forward(self, features: tuple[torch.Tensor, ...]) -> tuple[torch.Tensor, ...]:
-        p2_in, p3_in, p4_in, p5_sppf = features
+        p2_in, p3_in, p4_in, p4_sppf = features
 
         # --- Top-Down (FPN) ---
-        p5_up = self.up1(self.lateral_p4(p5_sppf))
-        p4_fused = self.fpn_c3k2_1(torch.cat([p5_up, p4_in], dim=1))
+        p4_up = self.up1(self.lateral_p3(p4_sppf))
+        p3_fused = self.fpn_c3k2_1(torch.cat([p4_up, p3_in], dim=1))
 
-        p4_up = self.up2(self.lateral_p3(p4_fused))
-        p3_fused = self.fpn_c3k2_2(torch.cat([p4_up, p3_in], dim=1))
-        
-        p3_up = self.up3(self.lateral_p2(p3_fused))
-        p2_fused = self.fpn_c3k2_3(torch.cat([p3_up, p2_in], dim=1))
+        p3_up = self.up2(self.lateral_p2(p3_fused))
+        p2_fused = self.fpn_c3k2_2(torch.cat([p3_up, p2_in], dim=1))
 
         # --- Bottom-Up (PAN) ---
         p2_down = self.down1(p2_fused)
         p3_out = self.pan_c3k2_1(torch.cat([p2_down, p3_fused], dim=1))
 
         p3_down = self.down2(p3_out)
-        p4_out = self.pan_c3k2_2(torch.cat([p3_down, p4_fused], dim=1))
+        p4_out = self.pan_c3k2_2(torch.cat([p3_down, p4_in], dim=1))
 
         return p2_fused, p3_out, p4_out
 

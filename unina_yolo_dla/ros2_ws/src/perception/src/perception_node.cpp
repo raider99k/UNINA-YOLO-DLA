@@ -456,6 +456,18 @@ public:
                   "Ensure input_width/height match the compiled engine!");
     }
 
+    // --- Calculate Head Dimensions ---
+    p2_w_ = input_width_ / 4;
+    p2_h_ = input_height_ / 4;
+    p3_w_ = input_width_ / 8;
+    p3_h_ = input_height_ / 8;
+    p4_w_ = input_width_ / 16;
+    p4_h_ = input_height_ / 16;
+
+    RCLCPP_INFO(this->get_logger(),
+                "Head dimensions: P2=%dx%d, P3=%dx%d, P4=%dx%d", p2_w_, p2_h_,
+                p3_w_, p3_h_, p4_w_, p4_h_);
+
     // --- Allocate CUDA Resources ---
     cuda_stream_ = create_preprocess_stream();
     d_preprocess_output_ =
@@ -614,16 +626,18 @@ public:
     // --- Step 4: GPU Post-Processing (ZERO D2H for feature maps) ---
     reset_detection_counter(cuda_stream_);
 
-    // P2 (160x160, stride 4)
-    decode_yolo_head(d_output_p2_cls_, d_output_p2_reg_, d_detections_, 160,
-                     160, 4, 4, confidence_threshold_, conformal_q_,
+    // P2 (stride 4)
+    decode_yolo_head(d_output_p2_cls_, d_output_p2_reg_, d_detections_, p2_w_,
+                     p2_h_, 4, 4, confidence_threshold_, conformal_q_,
                      cuda_stream_);
-    // P3 (80x80, stride 8)
-    decode_yolo_head(d_output_p3_cls_, d_output_p3_reg_, d_detections_, 80, 80,
-                     8, 4, confidence_threshold_, conformal_q_, cuda_stream_);
-    // P4 (40x40, stride 16)
-    decode_yolo_head(d_output_p4_cls_, d_output_p4_reg_, d_detections_, 40, 40,
-                     16, 4, confidence_threshold_, conformal_q_, cuda_stream_);
+    // P3 (stride 8)
+    decode_yolo_head(d_output_p3_cls_, d_output_p3_reg_, d_detections_, p3_w_,
+                     p3_h_, 8, 4, confidence_threshold_, conformal_q_,
+                     cuda_stream_);
+    // P4 (stride 16)
+    decode_yolo_head(d_output_p4_cls_, d_output_p4_reg_, d_detections_, p4_w_,
+                     p4_h_, 16, 4, confidence_threshold_, conformal_q_,
+                     cuda_stream_);
 
     // Get detection count
     int num_detections = 0;
@@ -680,9 +694,9 @@ private:
   // =========================================================================
 
   void allocate_detection_buffers() {
-    size_t p2_size = 4 * 160 * 160 * sizeof(float);
-    size_t p3_size = 4 * 80 * 80 * sizeof(float);
-    size_t p4_size = 4 * 40 * 40 * sizeof(float);
+    size_t p2_size = 4 * p2_w_ * p2_h_ * sizeof(float);
+    size_t p3_size = 4 * p3_w_ * p3_h_ * sizeof(float);
+    size_t p4_size = 4 * p4_w_ * p4_h_ * sizeof(float);
 
     cudaMalloc(&d_output_p2_cls_, p2_size);
     cudaMalloc(&d_output_p2_reg_, p2_size);
@@ -764,6 +778,9 @@ private:
   float conformal_q_ = 0.1f;
   int input_width_ = 640;
   int input_height_ = 640;
+
+  // Head dimensions
+  int p2_w_, p2_h_, p3_w_, p3_h_, p4_w_, p4_h_;
 
   // Zero-copy subscriber
   rclcpp::Subscription<perception::msg::GpuBufferPtr>::SharedPtr

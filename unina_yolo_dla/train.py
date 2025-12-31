@@ -485,7 +485,8 @@ class SmallObjectCallback:
                     self.all_ground_truths.append(labels)
         except Exception as e:
             # Gracefully handle extraction errors
-            pass
+            if self.verbose:
+                print(f"Warning: Failed to extract small object metrics data: {e}")
     
     def on_val_end(self, trainer):
         """Compute and log mAP_small at end of validation."""
@@ -505,8 +506,9 @@ class SmallObjectCallback:
                         gts_list = list(gts) if gts is not None else []
                     
                     self.metric.update(preds_list, gts_list)
-                except Exception:
-                    pass
+                except Exception as e:
+                    if self.verbose:
+                        print(f"Warning: Error updating metric for batch: {e}")
             
             results = self.metric.compute()
             print(f"\n>>> Small Object Metrics (< {self.size_threshold}x{self.size_threshold} px):")

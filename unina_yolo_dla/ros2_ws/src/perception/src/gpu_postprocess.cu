@@ -11,7 +11,6 @@
  *   4. CUB stream compaction for minimal D2H transfer
  */
 
-#include <cfloat>
 #include <cmath>
 #include <cuda_runtime.h>
 #include <device_launch_parameters.h>
@@ -48,12 +47,14 @@ struct __align__(32) GpuDetection {
 struct PostprocessWorkspace {
   int *d_detection_count;           // Device counter for atomic indexing
   GpuDetection *d_compacted_output; // Compacted output buffer
+  int *d_num_selected;              // Pre-allocated counter for CUB compaction
   void *d_cub_temp_storage;         // CUB temporary storage
   size_t cub_temp_storage_bytes;    // CUB temp storage size
 };
 
 // Global workspace (allocated once, reused per frame)
-static PostprocessWorkspace g_workspace = {nullptr, nullptr, nullptr, 0};
+static PostprocessWorkspace g_workspace = {nullptr, nullptr, nullptr, nullptr,
+                                           0};
 
 /**
  * @brief Sigmoid activation (inline device function)
@@ -128,23 +129,15 @@ __global__ void decode_yolo_head_kernel(const float *__restrict__ cls_data,
   }
 
   // Determine if this thread has a valid detection
-  bool has_detection = false;
+  int has_detection = (max_conf >= conf_threshold) ? 1 : 0;
 
-  // Early exit if below threshold (check before mask calculation)
-  if (max_conf >= conf_threshold) {
-    has_detection = true;
-  }
-
-  // OPTIMIZATION: Warp-Aggregated Atomics
-  // Reduce global atomic pressure by aggregating valid detections within a
-  // warp.
-
-  // Get mask of all threads in this warp that have a detection
+  // OPTIMIZATION: Warp-Aggregated Atomics (SM 8.7+ compatible)
+  // 1. Get mask of all threads in this warp that have a detection
   unsigned int mask = __activemask();
   unsigned int det_mask = __ballot_sync(mask, has_detection);
 
   if (has_detection) {
-    // Decode box (TLBR relative to cell center) only if valid
+    // 2. Decode box (TLBR relative to cell center)
     float x_center = (x + 0.5f) * stride;
     float y_center = (y + 0.5f) * stride;
 
@@ -168,25 +161,29 @@ __global__ void decode_yolo_head_kernel(const float *__restrict__ cls_data,
       y2 += h * conformal_q;
     }
 
-    // Calculate local rank (prefix sum of set bits)
-    // lane_id = threadIdx.x % 32 effectively
+    // 3. Coordinate within warp using intrinsic functions
+    // lane_id = threadIdx.x % 32
     int lane_id = (threadIdx.y * blockDim.x + threadIdx.x) % 32;
+
+    // Calculate local rank among active threads
     int active_rank = __popc(det_mask & ((1 << lane_id) - 1));
 
     // Elect a leader (first active thread in warp)
     int leader_idx = __ffs(det_mask) - 1;
     int warp_base_idx = 0;
 
-    // Leader performs single atomic add for the whole warp
+    // 4. Critical Section: Leader performs single atomic add for the whole warp
     if (lane_id == leader_idx) {
       int count_to_add = __popc(det_mask);
       warp_base_idx = atomicAdd(d_count, count_to_add);
     }
 
-    // Broadcast base index to all active threads in warp
+    // 5. Broadcast base index to all active threads in warp
+    // Note: det_mask ensures we only sync threads that are part of this
+    // aggregation
     warp_base_idx = __shfl_sync(det_mask, warp_base_idx, leader_idx);
 
-    // Calculate final index
+    // 6. Calculate final unique index and write to global memory
     int det_idx = warp_base_idx + active_rank;
 
     if (det_idx < MAX_DETECTIONS) {
@@ -281,18 +278,19 @@ cudaError_t init_postprocess_resources() {
   if (err != cudaSuccess)
     return err;
 
-  // Query CUB temporary storage size
-  g_workspace.cub_temp_storage_bytes = 0;
-  int *d_num_selected = nullptr;
-  err = cudaMalloc(&d_num_selected, sizeof(int));
+  // Allocate pre-allocated counter for CUB selection
+  err = cudaMalloc(&g_workspace.d_num_selected, sizeof(int));
   if (err != cudaSuccess)
     return err;
+
+  // Query CUB temporary storage size
+  g_workspace.cub_temp_storage_bytes = 0;
 
   // Dummy call to get temp storage size
   GpuDetection *d_dummy_in = nullptr;
   GpuDetection *d_dummy_out = nullptr;
   cub::DeviceSelect::If(nullptr, g_workspace.cub_temp_storage_bytes, d_dummy_in,
-                        d_dummy_out, d_num_selected, MAX_DETECTIONS,
+                        d_dummy_out, g_workspace.d_num_selected, MAX_DETECTIONS,
                         IsValidDetection());
 
   // Allocate CUB temp storage
@@ -300,8 +298,6 @@ cudaError_t init_postprocess_resources() {
                    g_workspace.cub_temp_storage_bytes);
   if (err != cudaSuccess)
     return err;
-
-  cudaFree(d_num_selected);
 
   return cudaSuccess;
 }
@@ -317,6 +313,10 @@ cudaError_t cleanup_postprocess_resources() {
   if (g_workspace.d_compacted_output) {
     cudaFree(g_workspace.d_compacted_output);
     g_workspace.d_compacted_output = nullptr;
+  }
+  if (g_workspace.d_num_selected) {
+    cudaFree(g_workspace.d_num_selected);
+    g_workspace.d_num_selected = nullptr;
   }
   if (g_workspace.d_cub_temp_storage) {
     cudaFree(g_workspace.d_cub_temp_storage);
@@ -402,34 +402,26 @@ cudaError_t copy_valid_detections_to_host(const GpuDetection *d_detections,
     return cudaSuccess;
   }
 
-  // Allocate temporary device counter for CUB
-  int *d_num_selected = nullptr;
-  cudaError_t err = cudaMalloc(&d_num_selected, sizeof(int));
-  if (err != cudaSuccess)
-    return err;
-
   // Run CUB stream compaction (GPU-side filtering)
-  err = cub::DeviceSelect::If(g_workspace.d_cub_temp_storage,
-                              g_workspace.cub_temp_storage_bytes, d_detections,
-                              g_workspace.d_compacted_output, d_num_selected,
-                              num_detections, IsValidDetection(), stream);
+  err = cub::DeviceSelect::If(
+      g_workspace.d_cub_temp_storage, g_workspace.cub_temp_storage_bytes,
+      d_detections, g_workspace.d_compacted_output, g_workspace.d_num_selected,
+      num_detections, IsValidDetection(), stream);
 
   if (err != cudaSuccess) {
-    cudaFree(d_num_selected);
     return err;
   }
 
   // Copy count to host
   int valid_count = 0;
-  err = cudaMemcpyAsync(&valid_count, d_num_selected, sizeof(int),
+  err = cudaMemcpyAsync(&valid_count, g_workspace.d_num_selected, sizeof(int),
                         cudaMemcpyDeviceToHost, stream);
   if (err != cudaSuccess) {
-    cudaFree(d_num_selected);
     return err;
   }
 
+  // MUST synchronize before reading valid_count on host!
   cudaStreamSynchronize(stream);
-  cudaFree(d_num_selected);
 
   // Clamp to MAX_DETECTIONS
   valid_count = (valid_count > MAX_DETECTIONS) ? MAX_DETECTIONS : valid_count;

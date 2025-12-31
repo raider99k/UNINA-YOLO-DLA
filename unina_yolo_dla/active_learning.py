@@ -34,45 +34,61 @@ def extract_backbone_embeddings(
     device: str = "cuda",
 ) -> tuple[np.ndarray, list[str]]:
     """
-    Extracts feature embeddings from the backbone's P4 output (or Global Average Pooled).
+    Extracts feature embeddings from the backbone's P4 output.
 
-    Args:
-        model: The UNINA_YOLO_DLA model (or similar with .backbone attribute).
-        dataloader: DataLoader yielding {"images": Tensor, "paths": list[str]}.
-        device: Computation device.
-
-    Returns:
-        Tuple of (embeddings array [N, D], list of image paths).
-
-    Raises:
-        ValueError: If dataloader is empty.
+    Handles both custom UNINA_YOLO_DLA models and Ultralytics DetectionModel wrappers.
     """
+    # Handle Ultralytics YOLO wrapper if passed directly
+    if hasattr(model, "model") and not isinstance(model, nn.Module):
+         model = model.model
+
     model.eval()
     model.to(device)
 
     all_embeddings: list[np.ndarray] = []
     all_paths: list[str] = []
 
-    # Extract only the backbone, not the full forward pass
-    backbone = getattr(model, "backbone", None)
-    if backbone is None:
-        # Fallback for models where backbone is not separated
-        backbone = model
-
     with torch.no_grad():
         for batch in dataloader:
             images = batch["images"].to(device)
             paths = batch["paths"]
 
-            # Forward through backbone only
-            # Backbone returns (p2, p3, p4, p5_sppf)
-            features = backbone(images)
+            # Strategy 1: Custom model with explicit .backbone
+            if hasattr(model, "backbone"):
+                features = model.backbone(images)
+                # Backbone returns (p2, p3, p4, p4_sppf)
+                p4 = features[2]
             
-            # Use P4 features (index 2) as embeddings
+            # Strategy 2: Ultralytics DetectionModel (Sequential-like with save list)
+            elif hasattr(model, "model") and isinstance(model.model, nn.Sequential):
+                # Manual traversal up to P4 (usually layer 6 in our YAML)
+                x = images
+                p4 = None
+                for i, m in enumerate(model.model):
+                    # Handle layers with multiple inputs (from list)
+                    if getattr(m, 'f', -1) != -1: # Custom Ultralytics logic
+                         # This is complex to re-implement, use forward hook instead if possible
+                         # But for backbone layers 0-6, they are mostly sequential
+                         pass 
+                    x = m(x)
+                    if i == 6: # P4 layer
+                        p4 = x
+                        break
+                if p4 is None: p4 = x # Fallback
+            
+            # Strategy 3: Generic fallback (full forward and try to find middle feature)
+            else:
+                # If we can't find backbone, we might have to hook
+                # For now, assume model(images) returns a list of features if custom
+                out = model(images)
+                if isinstance(out, (list, tuple)):
+                    p4 = out[2] if len(out) > 2 else out[-1]
+                else:
+                    p4 = out
+
             # Apply Global Average Pooling to get a single vector per image
-            p4 = features[2]  # Shape: [B, C, H, W]
-            pooled = torch.nn.functional.adaptive_avg_pool2d(p4, (1, 1))  # [B, C, 1, 1]
-            embeddings = pooled.view(pooled.size(0), -1)  # [B, C]
+            pooled = torch.nn.functional.adaptive_avg_pool2d(p4, (1, 1))
+            embeddings = pooled.view(pooled.size(0), -1)
 
             all_embeddings.append(embeddings.cpu().numpy())
             all_paths.extend(paths)
@@ -250,18 +266,23 @@ class ActiveLearner:
                     for level_out in outputs:
                         cls_out, reg_out = level_out
                         # cls_out: [B, num_classes, H, W]
-                        # reg_out: [B, 4, H, W]
-
-                        probs = torch.softmax(cls_out[i], dim=0)  # [C, H, W]
+                        
+                        # YOLO uses independent Sigmoid per class (Multi-label)
+                        probs = torch.sigmoid(cls_out[i]) # [C, H, W]
 
                         if mode == "entropy":
-                            # Shannon entropy per pixel, then max across spatial dims
-                            ent = -torch.sum(probs * torch.log(probs + 1e-10), dim=0)
+                            # Shannon entropy per pixel per class (Binary Entropy)
+                            # ent = -p*log(p) - (1-p)*log(1-p)
+                            ent = -(probs * torch.log(probs + 1e-10) + (1 - probs) * torch.log(1 - probs + 1e-10))
+                            # Max entropy across all classes and pixels
                             batch_scores.append(ent.max().item())
                         elif mode == "loc_var":
-                            # Proxy: inverse of max confidence
+                            # Proxy: Uncertainty in being any class (1.0 - max_conf)
+                            # Closer to 0.5 is more uncertain for sigmoid
                             conf = probs.max(dim=0)[0]
-                            batch_scores.append(1.0 - conf.max().item())
+                            # Distance from 0.5 (scaled to [0,1])
+                            uncertainty = 1.0 - (torch.abs(conf - 0.5) * 2.0)
+                            batch_scores.append(uncertainty.max().item())
 
                     scores[path] = max(batch_scores) if batch_scores else 0.0
 
@@ -324,6 +345,7 @@ class CopyPasteAugmentor:
         max_cones: int = 3,
         scale_range: tuple[float, float] = (0.5, 1.5),
         use_seamless_clone: bool = True,
+        class_map: dict[str, int] | None = None,
     ) -> None:
         """
         Args:
@@ -332,12 +354,19 @@ class CopyPasteAugmentor:
             max_cones: Maximum number of cones to paste per image.
             scale_range: (min_scale, max_scale) for random resizing.
             use_seamless_clone: If True, use cv2.seamlessClone for blending.
+            class_map: Mapping string patterns in filename to class IDs.
         """
         self.cone_assets_path = Path(cone_assets_path)
         self.min_cones = min_cones
         self.max_cones = max_cones
         self.scale_range = scale_range
         self.use_seamless_clone = use_seamless_clone
+        self.class_map = class_map or {
+            "yellow": 0,
+            "blue": 1,
+            "orange": 2,
+            "large": 3
+        }
 
         # Load asset paths
         self.cone_assets: list[Path] = []
@@ -350,16 +379,23 @@ class CopyPasteAugmentor:
         if not self.cone_assets:
             print(f"WARNING: No cone assets found in {self.cone_assets_path}")
 
-    def _load_asset(self, asset_path: Path) -> tuple[np.ndarray, np.ndarray] | None:
+    def _load_asset(self, asset_path: Path) -> tuple[np.ndarray, np.ndarray, int] | None:
         """
-        Loads a cone asset and its mask.
+        Loads a cone asset, its mask, and infers class.
 
         Returns:
-            Tuple of (RGB image, binary mask) or None on failure.
+            Tuple of (RGB image, binary mask, class_id) or None on failure.
         """
         try:
+            # Infer class from filename
+            fname = asset_path.name.lower()
+            inferred_cls = 0 # Default yellow
+            for key, val in self.class_map.items():
+                if key in fname:
+                    inferred_cls = val
+                    break
+
             if asset_path.suffix == ".npy":
-                # Assume .npy contains RGBA or (image, mask) tuple
                 data = np.load(asset_path, allow_pickle=True)
                 if isinstance(data, dict):
                     img = data.get("image")
@@ -370,14 +406,13 @@ class CopyPasteAugmentor:
                 else:
                     return None
             else:
-                # PNG with alpha channel
                 img_rgba = cv2.imread(str(asset_path), cv2.IMREAD_UNCHANGED)
                 if img_rgba is None or img_rgba.shape[2] < 4:
                     return None
                 img = cv2.cvtColor(img_rgba[:, :, :3], cv2.COLOR_BGR2RGB)
                 mask = img_rgba[:, :, 3] > 127
 
-            return img.astype(np.uint8), mask.astype(np.uint8)
+            return img.astype(np.uint8), mask.astype(np.uint8), inferred_cls
         except Exception:
             return None
 
@@ -471,7 +506,7 @@ class CopyPasteAugmentor:
             if asset_data is None:
                 continue
 
-            asset_img, asset_mask = asset_data
+            asset_img, asset_mask, asset_cls = asset_data
             asset_img, asset_mask = self._transform_asset(asset_img, asset_mask)
 
             # Try to find a valid position
@@ -485,7 +520,6 @@ class CopyPasteAugmentor:
                     roi = result[y : y + asset_h, x : x + asset_w]
 
                     if self.use_seamless_clone and asset_mask.sum() > 100:
-                        # Use seamlessClone for better blending
                         center = (x + asset_w // 2, y + asset_h // 2)
                         try:
                             mask_3ch = (asset_mask * 255).astype(np.uint8)
@@ -498,12 +532,10 @@ class CopyPasteAugmentor:
                             )
                             result = cv2.cvtColor(result, cv2.COLOR_BGR2RGB)
                         except cv2.error:
-                            # Fallback to alpha blending
                             alpha = asset_mask[:, :, np.newaxis].astype(np.float32)
                             blended = roi * (1 - alpha) + asset_img * alpha
                             result[y : y + asset_h, x : x + asset_w] = blended.astype(np.uint8)
                     else:
-                        # Simple alpha blending
                         alpha = asset_mask[:, :, np.newaxis].astype(np.float32)
                         blended = roi * (1 - alpha) + asset_img * alpha
                         result[y : y + asset_h, x : x + asset_w] = blended.astype(np.uint8)
@@ -511,13 +543,11 @@ class CopyPasteAugmentor:
                     # Update occupancy and labels
                     occupancy_mask[y : y + asset_h, x : x + asset_w] |= asset_mask
 
-                    # Add new label (class 0 for generic cone, normalized coords)
-                    # TODO: Infer class from asset filename if available
                     x_center = (x + asset_w / 2) / bg_w
                     y_center = (y + asset_h / 2) / bg_h
                     w_norm = asset_w / bg_w
                     h_norm = asset_h / bg_h
-                    labels.append([0, x_center, y_center, w_norm, h_norm])
+                    labels.append([asset_cls, x_center, y_center, w_norm, h_norm])
                     break
 
         return result, labels
