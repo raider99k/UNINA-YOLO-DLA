@@ -45,8 +45,43 @@ try:
     QAT_AVAILABLE = True
 except ImportError:
     QAT_AVAILABLE = False
-    print("WARNING: pytorch-quantization not found. QAT disabled.")
     print("Install with: pip install pytorch-quantization --extra-index-url https://pypi.ngc.nvidia.com")
+
+# --- Monkey-Patch Ultralytics to fix UnboundLocalError ---
+if ULTRALYTICS_AVAILABLE:
+    try:
+        import inspect
+        import ultralytics.nn.tasks as tasks
+        
+        # 1. Get original source
+        source = inspect.getsource(tasks.parse_model)
+        
+        # 2. Patch the source to force initialization of 'scale'
+        # We look for the line reading 'depth, width, kpt_shape = ...' and insert our fix before/after
+        if "scale = d.get(\"scale\")" not in source and "scale = d.get('scale')" not in source:
+             # If the line is missing (causing the error), we inject it early
+             split_marker = 'max_channels = float("inf")'
+             if split_marker in source:
+                 parts = source.split(split_marker)
+                 # Reconstruct with injection
+                 source = parts[0] + split_marker + '\n    scale = d.get("scale")\n    if scale is None: scale = "m" # PATCH INJECTED' + parts[1]
+                 print(f">>> Monkey-Patch applied: Injected 'scale' initialization into parse_model.")
+             else:
+                 print(f">>> WARNING: Could not apply monkey-patch (marker not found).")
+        else:
+             # If line exists but maybe is conditional or problematic, we force it again at top of logic
+             # This handles the case where UnboundLocalError suggests it's skipped
+             split_marker = 'max_channels = float("inf")'
+             if split_marker in source:
+                 parts = source.split(split_marker)
+                 source = parts[0] + split_marker + '\n    scale = d.get("scale")\n    if scale is None: scale = "m" # PATCH INJECTED' + parts[1]
+                 print(f">>> Monkey-Patch applied: Forced 'scale' initialization in parse_model.")
+
+        # 3. Execute in module namespace to redefine function
+        exec(source, tasks.__dict__)
+        
+    except Exception as e:
+        print(f">>> WARNING: Failed to monkey-patch parse_model: {e}")
 
 # --- Local Module Imports ---
 try:
