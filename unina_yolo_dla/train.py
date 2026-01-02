@@ -470,28 +470,49 @@ class SmallObjectCallback:
         self.all_predictions = []
         self.all_ground_truths = []
     
-    def on_val_batch_end(self, validator, batch, preds):
+    def on_val_batch_end(self, validator):
         """
         Update metric with batch predictions.
         
-        This hook receives the raw predictions and batch ground truths.
-        We accumulate them for final computation.
+        Ultralytics callback signature: on_val_batch_end(validator)
+        We extract batch and preds from the validator object.
         """
         try:
+            # Extract data from validator
+            batch = validator.batch
+            preds = validator.preds
+            
             # Extract ground truths from batch
-            # batch is typically (images, labels, paths, shapes)
-            if hasattr(batch, '__len__') and len(batch) >= 2:
-                labels = batch[1]  # Ground truth labels
-                
-                # preds are the model predictions after NMS
-                # Format varies by Ultralytics version
-                if preds is not None:
-                    self.all_predictions.append(preds)
-                if labels is not None:
-                    self.all_ground_truths.append(labels)
+            # batch is typically dict or list depending on the version/task
+            # For detection: {'img': ..., 'cls': ..., 'bboxes': ...} or list
+            labels = None
+            if isinstance(batch, dict):
+                 labels = batch.get('cls') # Attempt to retrieve classes or full labels
+                 # Note: This might need adjustment depending on exact batch structure for metrics
+                 # However, SmallObjectMetric usually needs ground truth boxes.
+                 # Let's try to get what's available.
+                 # Actually, for custom metrics, we might need access to unprocessed targets.
+                 pass
+            elif hasattr(batch, '__len__') and len(batch) >= 2:
+                 labels = batch[1]
+                 
+            # Note: Accessing raw targets from validator loops can be tricky.
+            # Ideally we use validator.batch for inputs.
+            # But validator.preds are post-NMS predictions.
+            
+            if preds is not None:
+                self.all_predictions.append(preds)
+            
+            # We really need the ground truth for this batch. 
+            # In 'validator.batch', we have the inputs. 
+            # Let's store the batch data itself to be safe or try to extract 'batch' from arguments if possible?
+            # No, signature is fixed. Using validator.batch is correct.
+            if hasattr(validator, 'batch'):
+                 self.all_ground_truths.append(validator.batch)
+
         except Exception as e:
             # Gracefully handle extraction errors
-            if self.verbose:
+            if hasattr(self, 'verbose') and self.verbose:
                 print(f"Warning: Failed to extract small object metrics data: {e}")
     
     def on_val_end(self, trainer):
