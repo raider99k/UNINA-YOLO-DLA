@@ -23,6 +23,22 @@
 
 set -e  # Exit on error
 
+# --- Step 0: Check for Virtual Environment ---
+if [ -z "$VIRTUAL_ENV" ]; then
+    if [ -d ".venv" ]; then
+        echo ">>> Virtual environment detected but not active."
+        echo "    Activating .venv..."
+        source .venv/bin/activate
+    else
+        echo ">>> WARNING: No virtual environment detected."
+        echo "    It is recommended to run ./setup_env.sh first."
+        echo ""
+    fi
+else
+    echo ">>> Using active virtual environment: $VIRTUAL_ENV"
+fi
+echo ""
+
 # --- Configuration ---
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 EPOCHS=2
