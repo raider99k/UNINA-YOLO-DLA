@@ -518,20 +518,46 @@ class SmallObjectCallback:
         """Compute and log mAP_small at end of validation."""
         if self.metric and self.all_predictions and self.all_ground_truths:
             # Update metric with accumulated data
-            for preds, gts in zip(self.all_predictions, self.all_ground_truths):
+            for preds, batch in zip(self.all_predictions, self.all_ground_truths):
                 try:
-                    # Convert to list format expected by SmallObjectMetric
-                    if hasattr(preds, 'tolist'):
+                    # 1. Prepare Predictions
+                    # preds from Ultralytics is typically a list of (N, 6) tensors (one per image)
+                    if isinstance(preds, (list, tuple)):
+                        preds_list = preds
+                    elif torch.is_tensor(preds):
                         preds_list = [preds]
                     else:
-                        preds_list = list(preds) if preds is not None else []
+                        preds_list = []
+
+                    # 2. Prepare Ground Truths
+                    # batch from Ultralytics is a dict: {'img', 'cls', 'bboxes', 'batch_idx', ...}
+                    gts_list = []
+                    if isinstance(batch, dict) and 'batch_idx' in batch:
+                        # Extract GTs per image from the flat batch
+                        batch_idx = batch['batch_idx']
+                        cls = batch['cls']
+                        bboxes = batch['bboxes']
+                        
+                        # Use img shape or batch_idx to determine number of images
+                        n_images = len(preds_list) if preds_list else int(batch_idx.max().item() + 1 if batch_idx.numel() > 0 else 0)
+                        
+                        if n_images > 0:
+                            for i in range(n_images):
+                                mask = (batch_idx == i).reshape(-1)
+                                if mask.any():
+                                    img_cls = cls[mask]
+                                    img_bboxes = bboxes[mask]
+                                    # Form [cls, x, y, w, h]
+                                    img_gt = torch.cat([img_cls.reshape(-1, 1), img_bboxes], dim=1)
+                                    gts_list.append(img_gt)
+                                else:
+                                    # No GT for this image
+                                    gts_list.append(torch.zeros((0, 5), device=cls.device))
+                    elif isinstance(batch, (list, tuple)):
+                        gts_list = batch
                     
-                    if hasattr(gts, 'tolist'):
-                        gts_list = [gts]
-                    else:
-                        gts_list = list(gts) if gts is not None else []
-                    
-                    self.metric.update(preds_list, gts_list)
+                    if preds_list and gts_list:
+                        self.metric.update(preds_list, gts_list)
                 except Exception as e:
                     if self.verbose:
                         print(f"Warning: Error updating metric for batch: {e}")
