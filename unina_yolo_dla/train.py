@@ -83,6 +83,38 @@ if ULTRALYTICS_AVAILABLE:
     except Exception as e:
         print(f">>> WARNING: Failed to monkey-patch parse_model: {e}")
 
+# --- Environment-Aware Kaggle Fixes ---
+def is_kaggle_environment():
+    """Returns True if running inside a Kaggle Kernel."""
+    return os.environ.get('KAGGLE_KERNEL_RUN_TYPE') is not None or os.environ.get('KAGGLE_URL') is not None
+
+def patch_kaggle_environment(trainer_or_model):
+    """
+    Surgically disable RayTune callbacks only on Kaggle to prevent AttributeError.
+    Zero-impact on other environments (servers, local).
+    """
+    if not is_kaggle_environment():
+        return
+
+    targets = ['on_fit_epoch_end', 'on_train_epoch_end']
+    # Check if we are dealing with a YOLO model object or a Trainer
+    trainer = trainer_or_model.trainer if hasattr(trainer_or_model, 'trainer') else trainer_or_model
+    
+    if hasattr(trainer, 'callbacks'):
+        modified = False
+        for event in targets:
+            if event in trainer.callbacks:
+                original_callbacks = trainer.callbacks[event]
+                new_callbacks = [
+                    cb for cb in original_callbacks 
+                    if 'raytune' not in str(cb.__module__)
+                ]
+                if len(new_callbacks) != len(original_callbacks):
+                    trainer.callbacks[event] = new_callbacks
+                    modified = True
+        if modified:
+            print(">>> KAGGLE PATCH: Disabled RayTune callbacks to prevent environment crash.")
+
 # --- Local Module Imports ---
 try:
     from data_loader import create_active_learning_dataloader, SmallObjectMetric
@@ -941,6 +973,10 @@ def train_phase1_fp32(
             trainer.add_callback("on_val_end", small_obj_cb.on_val_end)
             
             print(">>> Custom Trainer and Callbacks Initialized.")
+            
+            # Surgically patch Kaggle-specific Ray issues if detected
+            patch_kaggle_environment(trainer)
+            
             trainer.train()
             
             # Retrieve best weight path from trainer state
@@ -962,6 +998,9 @@ def train_phase1_fp32(
                      replace_silu_with_relu(model.model)
             except Exception as e_patch:
                  print(f">>> WARNING: Failed to patch fallback model: {e_patch}")
+
+            # Also surgical patch for fallback path on Kaggle
+            patch_kaggle_environment(model)
 
             model.train(**args)
             best_weights = Path(project) / name / "weights" / "best.pt"
