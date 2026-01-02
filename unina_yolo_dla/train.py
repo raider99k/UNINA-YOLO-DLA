@@ -1127,7 +1127,6 @@ def main():
     parser.add_argument('--qat-epochs', type=int, default=20, help="QAT fine-tuning epochs")
     parser.add_argument('--batch', type=int, default=16, help="Batch size")
     parser.add_argument('--imgsz', type=int, default=640, help="Image size")
-    parser.add_argument('--imgsz', type=int, default=640, help="Image size")
     parser.add_argument('--device', type=str, default='0', help="Device: GPU ID (0,1) or 'cpu'")
     parser.add_argument('--weights', type=str, default=None, help="Initial weights path (e.g. yolov8n.pt)")
     parser.add_argument('--pretrained', action='store_true', help="Enable pretrained weights (default: False/Scratch)")
