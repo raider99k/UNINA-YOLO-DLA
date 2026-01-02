@@ -1032,7 +1032,7 @@ def main():
     
     # Data/Model
     parser.add_argument(
-        '--model', type=str, default='unina-yolo-dla.yaml',
+        '--model', type=str, default='unina-yolo-dla-m.yaml',
         help="Model YAML configuration file"
     )
     parser.add_argument(
