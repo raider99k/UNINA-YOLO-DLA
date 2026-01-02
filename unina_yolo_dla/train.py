@@ -23,6 +23,7 @@ from pathlib import Path
 import torch
 import torch.nn as nn
 import numpy as np
+import yaml
 
 # --- Ultralytics Imports ---
 try:
@@ -406,6 +407,23 @@ if ULTRALYTICS_AVAILABLE:
             """
             # Use getattr for rank compatibility with different Ultralytics versions
             rank = getattr(self, 'rank', -1)
+            # PATCH: Explicitly load config and inject 'scale' to fix UnboundLocalError in Ultralytics
+            if isinstance(cfg, str):
+                try:
+                    with open(cfg, 'r') as f:
+                        cfg_dict = yaml.safe_load(f)
+                    
+                    # Force inject 'scale' if missing (Ultralytics parser bug)
+                    if 'scale' not in cfg_dict:
+                        # Infer from filename or default to 'm' (unina-yolo-dla.yaml corresponds to 'm' sizing)
+                        cfg_dict['scale'] = 'm'
+                        if verbose:
+                            print(f">>> PATCH: Injected scale='m' into config: {cfg}")
+                    
+                    cfg = cfg_dict
+                except Exception as e:
+                    print(f"WARNING: Could not load config in get_model: {e}")
+
             model = DetectionModel(
                 cfg, 
                 nc=self.data['nc'], 
