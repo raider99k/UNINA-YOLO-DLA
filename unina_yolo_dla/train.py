@@ -520,26 +520,33 @@ class SmallObjectCallback:
             # Update metric with accumulated data
             for preds, batch in zip(self.all_predictions, self.all_ground_truths):
                 try:
-                    # 1. Prepare Predictions
-                    # preds from Ultralytics is typically a list of (N, 6) tensors (one per image)
+                    # 1. Prepare Predictions (ensure Tensors)
+                    preds_list = []
                     if isinstance(preds, (list, tuple)):
-                        preds_list = preds
+                        for p in preds:
+                            if torch.is_tensor(p):
+                                preds_list.append(p)
+                            elif hasattr(p, 'numpy'): # Could be a Result object?
+                                preds_list.append(torch.from_numpy(p.numpy()))
+                            elif isinstance(p, np.ndarray):
+                                preds_list.append(torch.from_numpy(p))
                     elif torch.is_tensor(preds):
                         preds_list = [preds]
-                    else:
-                        preds_list = []
+                    elif isinstance(preds, np.ndarray):
+                        preds_list = [torch.from_numpy(preds)]
 
-                    # 2. Prepare Ground Truths
-                    # batch from Ultralytics is a dict: {'img', 'cls', 'bboxes', 'batch_idx', ...}
+                    # 2. Prepare Ground Truths (ensure Tensors)
                     gts_list = []
                     if isinstance(batch, dict) and 'batch_idx' in batch:
                         # Extract GTs per image from the flat batch
-                        batch_idx = batch['batch_idx']
-                        cls = batch['cls']
-                        bboxes = batch['bboxes']
+                        batch_idx = torch.as_tensor(batch['batch_idx'])
+                        cls = torch.as_tensor(batch['cls'])
+                        bboxes = torch.as_tensor(batch['bboxes'])
                         
-                        # Use img shape or batch_idx to determine number of images
-                        n_images = len(preds_list) if preds_list else int(batch_idx.max().item() + 1 if batch_idx.numel() > 0 else 0)
+                        # Number of images in this batch
+                        n_images = len(preds_list)
+                        if n_images == 0 and batch_idx.numel() > 0:
+                            n_images = int(batch_idx.max().item() + 1)
                         
                         if n_images > 0:
                             for i in range(n_images):
@@ -548,16 +555,22 @@ class SmallObjectCallback:
                                     img_cls = cls[mask]
                                     img_bboxes = bboxes[mask]
                                     # Form [cls, x, y, w, h]
-                                    img_gt = torch.cat([img_cls.reshape(-1, 1), img_bboxes], dim=1)
+                                    img_gt = torch.cat([img_cls.reshape(-1, 1).float(), img_bboxes.float()], dim=1)
                                     gts_list.append(img_gt)
                                 else:
-                                    # No GT for this image
                                     gts_list.append(torch.zeros((0, 5), device=cls.device))
                     elif isinstance(batch, (list, tuple)):
-                        gts_list = batch
+                        # If already a list, ensure elements are tensors
+                        for g in batch:
+                            if torch.is_tensor(g):
+                                gts_list.append(g)
+                            elif isinstance(g, np.ndarray):
+                                gts_list.append(torch.from_numpy(g))
                     
                     if preds_list and gts_list:
-                        self.metric.update(preds_list, gts_list)
+                        # Ensure lists match in length for zip in metric.update
+                        min_len = min(len(preds_list), len(gts_list))
+                        self.metric.update(preds_list[:min_len], gts_list[:min_len])
                 except Exception as e:
                     if self.verbose:
                         print(f"Warning: Error updating metric for batch: {e}")
