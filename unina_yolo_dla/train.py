@@ -449,9 +449,10 @@ class SmallObjectCallback:
     
     Reference: RESEARCH.md Section 5.2 - mAP for objects < 15x15 pixels.
     """
-    def __init__(self, size_threshold: int = 15, image_size: int = 640):
+    def __init__(self, size_threshold: int = 15, image_size: int = 640, verbose: bool = True):
         self.size_threshold = size_threshold
         self.image_size = image_size
+        self.verbose = verbose
         self.metric = None
         if DATA_LOADER_AVAILABLE:
             self.metric = SmallObjectMetric(
