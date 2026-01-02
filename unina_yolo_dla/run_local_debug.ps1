@@ -12,14 +12,11 @@
 # =============================================================================
 
 param(
-    [switch]$SkipDeps = $true,
     [switch]$SkipGen,
     [int]$Epochs = 2,
     [int]$BatchSize = 4,
     [int]$ImgSize = 320
 )
-
-
 
 $ErrorActionPreference = "Stop"
 
@@ -33,25 +30,12 @@ Write-Host "Configuration:"
 Write-Host "  Epochs:     $Epochs"
 Write-Host "  Batch Size: $BatchSize"
 Write-Host "  Image Size: $ImgSize"
-Write-Host "  Skip Deps:  $SkipDeps"
 Write-Host "  Skip Gen:   $SkipGen"
 Write-Host ""
 
-# --- Step 1: Install Dependencies ---
-if (-not $SkipDeps) {
-    Write-Host ">>> Step 1: Installing dependencies..." -ForegroundColor Yellow
-    pip install --quiet --upgrade pip
-    pip install --quiet ultralytics opencv-python numpy torch
-    Write-Host "    Dependencies installed." -ForegroundColor Green
-}
-else {
-    Write-Host ">>> Step 1: Skipping dependency installation." -ForegroundColor Gray
-}
-Write-Host ""
-
-# --- Step 2: Generate Synthetic Dataset ---
+# --- Step 1: Generate Synthetic Dataset ---
 if (-not $SkipGen) {
-    Write-Host ">>> Step 2: Generating synthetic FSD dataset..." -ForegroundColor Yellow
+    Write-Host ">>> Step 1: Generating synthetic FSD dataset..." -ForegroundColor Yellow
     python "$ScriptDir\tools\generate_synthetic_fsd.py" `
         --num-train 50 `
         --num-val 10 `
@@ -59,12 +43,12 @@ if (-not $SkipGen) {
     Write-Host "    Dataset generated." -ForegroundColor Green
 }
 else {
-    Write-Host ">>> Step 2: Skipping dataset generation." -ForegroundColor Gray
+    Write-Host ">>> Step 1: Skipping dataset generation." -ForegroundColor Gray
 }
 Write-Host ""
 
-# --- Step 3: Verify Dataset Structure ---
-Write-Host ">>> Step 3: Verifying dataset structure..." -ForegroundColor Yellow
+# --- Step 2: Verify Dataset Structure ---
+Write-Host ">>> Step 2: Verifying dataset structure..." -ForegroundColor Yellow
 $DatasetDir = "$ScriptDir\datasets\fsd_synth"
 $ConfigFile = "$DatasetDir\fsd_synth.yaml"
 
@@ -85,8 +69,8 @@ if ($TrainImages -lt 10 -or $ValImages -lt 5) {
 Write-Host "    Dataset structure OK." -ForegroundColor Green
 Write-Host ""
 
-# --- Step 4: Run Training Dry-Run ---
-Write-Host ">>> Step 4: Running training dry-run (CPU mode)..." -ForegroundColor Yellow
+# --- Step 3: Run Training Dry-Run ---
+Write-Host ">>> Step 3: Running training dry-run (CPU mode)..." -ForegroundColor Yellow
 Write-Host "    This verifies the training loop completes without errors."
 Write-Host ""
 

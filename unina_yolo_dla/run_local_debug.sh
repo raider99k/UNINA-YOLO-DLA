@@ -30,16 +30,11 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 EPOCHS=2
 BATCH_SIZE=4
 IMG_SIZE=320  # Smaller for faster testing
-SKIP_DEPS=true
 SKIP_GEN=false
 
 # --- Parse Arguments ---
 while [[ $# -gt 0 ]]; do
     case $1 in
-        --install-deps)
-            SKIP_DEPS=false
-            shift
-            ;;
         --skip-gen)
             SKIP_GEN=true
             shift
@@ -63,36 +58,24 @@ echo "Configuration:"
 echo "  Epochs:     $EPOCHS"
 echo "  Batch Size: $BATCH_SIZE"
 echo "  Image Size: $IMG_SIZE"
-echo "  Skip Deps:  $SKIP_DEPS"
 echo "  Skip Gen:   $SKIP_GEN"
 echo ""
 
-# --- Step 1: Install Dependencies ---
-if [ "$SKIP_DEPS" = false ]; then
-    echo ">>> Step 1: Installing dependencies..."
-    pip install --quiet --upgrade pip
-    pip install --quiet ultralytics opencv-python numpy torch
-    echo "    Dependencies installed."
-else
-    echo ">>> Step 1: Skipping dependency installation."
-fi
-echo ""
-
-# --- Step 2: Generate Synthetic Dataset ---
+# --- Step 1: Generate Synthetic Dataset ---
 if [ "$SKIP_GEN" = false ]; then
-    echo ">>> Step 2: Generating synthetic FSD dataset..."
+    echo ">>> Step 1: Generating synthetic FSD dataset..."
     python "$SCRIPT_DIR/tools/generate_synthetic_fsd.py" \
         --num-train 50 \
         --num-val 10 \
         --seed 42
     echo "    Dataset generated."
 else
-    echo ">>> Step 2: Skipping dataset generation."
+    echo ">>> Step 1: Skipping dataset generation."
 fi
 echo ""
 
-# --- Step 3: Verify Dataset Structure ---
-echo ">>> Step 3: Verifying dataset structure..."
+# --- Step 2: Verify Dataset Structure ---
+echo ">>> Step 2: Verifying dataset structure..."
 DATASET_DIR="$SCRIPT_DIR/datasets/fsd_synth"
 CONFIG_FILE="$DATASET_DIR/fsd_synth.yaml"
 
@@ -113,8 +96,8 @@ fi
 echo "    Dataset structure OK."
 echo ""
 
-# --- Step 4: Run Training Dry-Run ---
-echo ">>> Step 4: Running training dry-run (CPU mode)..."
+# --- Step 3: Run Training Dry-Run ---
+echo ">>> Step 3: Running training dry-run (CPU mode)..."
 echo "    This verifies the training loop completes without errors."
 echo ""
 
