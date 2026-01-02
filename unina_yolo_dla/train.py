@@ -960,6 +960,14 @@ def train_phase2_qat(
     
     # Fine-tune with QAT
     print(">>> Starting QAT fine-tuning...")
+    
+    # Register Small Object Metric Callback for QAT phase
+    small_obj_cb = SmallObjectCallback(size_threshold=15, image_size=imgsz)
+    model.add_callback("on_val_start", small_obj_cb.on_val_start)
+    model.add_callback("on_val_batch_end", small_obj_cb.on_val_batch_end)
+    model.add_callback("on_val_end", small_obj_cb.on_val_end)
+    print(">>> QAT Trainer and Callbacks Initialized.")
+    
     results = model.train(
         data=data_yaml,
         epochs=epochs,
