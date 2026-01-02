@@ -13,6 +13,9 @@
 # Number of classes (Formula Student Cones)
 nc: 4
 
+# Scale (added to fix UnboundLocalError in Ultralytics)
+scale: m
+
 # Scaling factors
 depth_multiple: 0.50
 width_multiple: 1.00  # Channels are now explicitly scaled in config
