@@ -866,6 +866,8 @@ def train_phase1_fp32(
     device: int = 0,
     project: str = "runs/unina_dla",
     name: str = "fp32",
+    pretrained: bool = False,
+    weights: str = None,
 ) -> str:
     """
     Phase 1: Train model in FP32 with ReLU activations.
@@ -893,7 +895,34 @@ def train_phase1_fp32(
         dynamic=False,  # DLA requires static shapes
         amp=True,       # Mixed precision for speed
         verbose=True,
+        pretrained=pretrained,
     )
+    
+    # If explicit weights are provided, override 'model' arg or use as 'weights'
+    # For Training from scratch, Ultralytics uses 'model=yaml'.
+    # For Transfer Learning, 'model=pt' or 'model=yaml, weights=pt'.
+    if weights:
+        args['model'] = weights  # If weights provided, start from them? 
+        # Actually Ultralytics logic:
+        # model=yaml -> scratch (unless pretrained=True -> downloads default)
+        # model=pt -> finetune
+        # We want to use our custom YAML structure but maybe load weights?
+        # Typically: model=yaml, pretrained=pt uses the pt weights on that architecture.
+        # But here 'weights' arg usually means starting checkpoint.
+        # Let's trust Ultralytics 'pretrained' arg if boolean, or path if string.
+        # However, we simply pass 'model=yaml' and 'pretrained=False' to scratch.
+        # If user provides weights, we might want to load them.
+        # Let's stick to: pass 'pretrained' (bool/str) to overrides.
+        pass
+
+    # If weights is a path, Ultralytics 'pretrained' arg can take it, OR we load it later.
+    # But simpler: use the 'pretrained' arg of the Trainer.
+    # If weights is provided, we set pretrained=weights (path).
+    if weights:
+         args['pretrained'] = weights
+    else:
+         args['pretrained'] = pretrained # False by default
+
 
     if ULTRALYTICS_AVAILABLE:
         try:
@@ -1098,7 +1127,10 @@ def main():
     parser.add_argument('--qat-epochs', type=int, default=20, help="QAT fine-tuning epochs")
     parser.add_argument('--batch', type=int, default=16, help="Batch size")
     parser.add_argument('--imgsz', type=int, default=640, help="Image size")
+    parser.add_argument('--imgsz', type=int, default=640, help="Image size")
     parser.add_argument('--device', type=str, default='0', help="Device: GPU ID (0,1) or 'cpu'")
+    parser.add_argument('--weights', type=str, default=None, help="Initial weights path (e.g. yolov8n.pt)")
+    parser.add_argument('--pretrained', action='store_true', help="Enable pretrained weights (default: False/Scratch)")
     
     # Output
     parser.add_argument('--project', type=str, default='runs/unina_dla', help="Project directory")
@@ -1157,6 +1189,8 @@ def main():
             device=args.device,
             project=args.project,
             name="fp32",
+            pretrained=args.pretrained,
+            weights=args.weights,
         )
     
     # Phase 2: QAT
