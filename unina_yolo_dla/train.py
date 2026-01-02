@@ -951,6 +951,18 @@ def train_phase1_fp32(
             print("Falling back to standard YOLO.train()...")
             # Fallback
             model = YOLO(model_yaml)
+            
+            # PATCH: Apply ReLU to fallback model for DLA compatibility
+            try:
+                 if not hasattr(model, 'model') or model.model is None:
+                     model._new(model_yaml, task='detect')
+                 
+                 if hasattr(model, 'model'):
+                     print(">>> PATCH: Applying ReLU to fallback model for DLA compatibility.")
+                     replace_silu_with_relu(model.model)
+            except Exception as e_patch:
+                 print(f">>> WARNING: Failed to patch fallback model: {e_patch}")
+
             model.train(**args)
             best_weights = Path(project) / name / "weights" / "best.pt"
             
