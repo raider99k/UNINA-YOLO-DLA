@@ -19,23 +19,7 @@ param(
     [int]$ImgSize = 320
 )
 
-# --- Step 0: Check for Virtual Environment ---
-if ($null -eq $env:VIRTUAL_ENV) {
-    if (Test-Path ".venv") {
-        Write-Host ">>> Virtual environment detected but not active." -ForegroundColor Yellow
-        Write-Host "    Activating .venv..."
-        & .\.venv\Scripts\Activate.ps1
-    }
-    else {
-        Write-Host ">>> WARNING: No virtual environment detected." -ForegroundColor Yellow
-        Write-Host "    It is recommended to run .\setup_env.ps1 first."
-        Write-Host ""
-    }
-}
-else {
-    Write-Host ">>> Using active virtual environment: $env:VIRTUAL_ENV" -ForegroundColor Green
-}
-Write-Host ""
+
 
 $ErrorActionPreference = "Stop"
 
