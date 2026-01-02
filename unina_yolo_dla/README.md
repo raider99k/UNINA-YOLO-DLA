@@ -54,6 +54,3 @@ The training follows a two-phase approach:
 ## 🏎️ Deployment
 
 Models are exported to ONNX and then compiled to TensorRT engines with DLA core selection. Ensure zero-fallback on GPU for maximum efficiency.
-
----
-*UNINA Formula Student - Vision & Perception Team*
