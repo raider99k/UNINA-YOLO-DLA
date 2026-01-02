@@ -475,41 +475,39 @@ class SmallObjectCallback:
         Update metric with batch predictions.
         
         Ultralytics callback signature: on_val_batch_end(validator)
-        We extract batch and preds from the validator object.
+        preds and batch are NOT direct attributes of validator - they must be
+        extracted from the caller's local scope using frame introspection.
+        
+        Reference: https://docs.ultralytics.com/usage/callbacks/
         """
+        import inspect
+        
         try:
-            # Extract data from validator
-            batch = validator.batch
-            preds = validator.preds
-            
-            # Extract ground truths from batch
-            # batch is typically dict or list depending on the version/task
-            # For detection: {'img': ..., 'cls': ..., 'bboxes': ...} or list
-            labels = None
-            if isinstance(batch, dict):
-                 labels = batch.get('cls') # Attempt to retrieve classes or full labels
-                 # Note: This might need adjustment depending on exact batch structure for metrics
-                 # However, SmallObjectMetric usually needs ground truth boxes.
-                 # Let's try to get what's available.
-                 # Actually, for custom metrics, we might need access to unprocessed targets.
-                 pass
-            elif hasattr(batch, '__len__') and len(batch) >= 2:
-                 labels = batch[1]
-                 
-            # Note: Accessing raw targets from validator loops can be tricky.
-            # Ideally we use validator.batch for inputs.
-            # But validator.preds are post-NMS predictions.
-            
-            if preds is not None:
-                self.all_predictions.append(preds)
-            
-            # We really need the ground truth for this batch. 
-            # In 'validator.batch', we have the inputs. 
-            # Let's store the batch data itself to be safe or try to extract 'batch' from arguments if possible?
-            # No, signature is fixed. Using validator.batch is correct.
-            if hasattr(validator, 'batch'):
-                 self.all_ground_truths.append(validator.batch)
-
+            # Access the caller's local variables to get preds and batch
+            # The callback is called from within the validation loop
+            frame = inspect.currentframe()
+            if frame is not None:
+                # Go up the call stack to find preds and batch
+                # Typically: on_val_batch_end -> run_callbacks -> validate loop
+                caller_locals = None
+                for _ in range(5):  # Search up to 5 levels
+                    frame = frame.f_back
+                    if frame is None:
+                        break
+                    locals_dict = frame.f_locals
+                    if 'preds' in locals_dict and 'batch' in locals_dict:
+                        caller_locals = locals_dict
+                        break
+                
+                if caller_locals:
+                    preds = caller_locals.get('preds')
+                    batch = caller_locals.get('batch')
+                    
+                    if preds is not None:
+                        self.all_predictions.append(preds)
+                    if batch is not None:
+                        self.all_ground_truths.append(batch)
+                        
         except Exception as e:
             # Gracefully handle extraction errors
             if hasattr(self, 'verbose') and self.verbose:
