@@ -12,7 +12,7 @@
 # =============================================================================
 
 param(
-    [switch]$SkipDeps,
+    [switch]$SkipDeps = $true,
     [switch]$SkipGen,
     [int]$Epochs = 2,
     [int]$BatchSize = 4,

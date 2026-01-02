@@ -44,14 +44,14 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 EPOCHS=2
 BATCH_SIZE=4
 IMG_SIZE=320  # Smaller for faster testing
-SKIP_DEPS=false
+SKIP_DEPS=true
 SKIP_GEN=false
 
 # --- Parse Arguments ---
 while [[ $# -gt 0 ]]; do
     case $1 in
-        --skip-deps)
-            SKIP_DEPS=true
+        --install-deps)
+            SKIP_DEPS=false
             shift
             ;;
         --skip-gen)
