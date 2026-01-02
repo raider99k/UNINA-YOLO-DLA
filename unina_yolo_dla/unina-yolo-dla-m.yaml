@@ -13,9 +13,6 @@
 # Number of classes (Formula Student Cones)
 nc: 4
 
-# Explicitly use ReLU for DLA compatibility (avoids SiLU which is slow on DLA)
-activation: nn.ReLU
-
 # Scaling factors
 depth_multiple: 0.50
 width_multiple: 1.00  # Channels are now explicitly scaled in config
