@@ -919,6 +919,8 @@ def train_phase2_qat(
     
     # Load model with quantized layers
     qat_model = YOLO(model_yaml)
+    if hasattr(qat_model, 'model'):
+        replace_silu_with_relu(qat_model.model)
     
     # Load original FP32 model for weight extraction
     print(f">>> Loading FP32 weights from: {fp32_weights}")
