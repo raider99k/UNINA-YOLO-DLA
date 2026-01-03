@@ -3,7 +3,8 @@ UNINA-YOLO-DLA: Data Ingestion Module.
 
 This module provides:
 1. A hybrid DataLoader that mixes Real and Synthetic datasets.
-2. A specialized validation metric for Small Objects (< 15x15 pixels).
+2. Active Learning support with difficulty-weighted sampling.
+3. A specialized validation metric for Small Objects (< 15x15 pixels).
 
 Key Requirements:
     - The DataLoader must be compatible with standard PyTorch training loops.
@@ -25,31 +26,68 @@ import numpy as np
 
 import cv2  # OpenCV for image loading
 
+# Try to import Ultralytics optimized dataset
+try:
+    from ultralytics.data.dataset import YOLODataset as UltralyticsYOLODataset
+    from ultralytics.data.build import build_dataloader
+    ULTRALYTICS_DATASET_AVAILABLE = True
+except ImportError:
+    ULTRALYTICS_DATASET_AVAILABLE = False
+    print("WARNING: Ultralytics dataset not available. Using legacy YOLODataset.")
 
-# --- Dataset Definitions ---
+
+# --- Optimized Dataset (Extends Ultralytics) ---
+
+if ULTRALYTICS_DATASET_AVAILABLE:
+    class ActiveLearningDataset(UltralyticsYOLODataset):
+        """
+        Extends Ultralytics YOLODataset with difficulty-weighted sampling support.
+        
+        Inherits all Ultralytics optimizations (caching, prefetching, mosaics)
+        while adding Active Learning capabilities.
+        
+        Args:
+            difficulty_scores: Dictionary mapping image paths to difficulty scores.
+                              Higher scores = harder examples = sampled more often.
+        """
+        
+        def __init__(self, *args, difficulty_scores: dict[str, float] | None = None, **kwargs):
+            super().__init__(*args, **kwargs)
+            self.difficulty_scores = difficulty_scores or {}
+        
+        def get_sample_weight(self, idx: int) -> float:
+            """Returns sampling weight for this index based on difficulty scores."""
+            if not self.difficulty_scores:
+                return 1.0
+            
+            img_path = str(self.im_files[idx])
+            # Also try with just filename (keys might not have full path)
+            img_name = Path(img_path).name
+            
+            weight = self.difficulty_scores.get(img_path, 
+                     self.difficulty_scores.get(img_name, 1.0))
+            return max(weight, 0.1)  # Ensure minimum weight
+        
+        def get_all_weights(self) -> list[float]:
+            """Returns sampling weights for all images."""
+            return [self.get_sample_weight(i) for i in range(len(self))]
+
+
+# --- Legacy Dataset (Fallback) ---
 
 class YOLODataset(Dataset):
     """
-    A dataset class for YOLO-format annotations.
+    Legacy dataset class for YOLO-format annotations.
+    Used when Ultralytics is not available.
 
     Expects a directory structure like:
         dataset_root/
             images/
                 img_001.jpg
-                img_002.png
                 ...
             labels/
                 img_001.txt
-                img_002.txt
                 ...
-
-    Each label file contains lines in YOLO format:
-        <class_id> <x_center> <y_center> <width> <height>
-    All values are normalized (0-1 relative to image dimensions).
-
-    Args:
-        root: Path to the dataset root directory.
-        transform: Optional callable to apply transformations to images.
     """
     def __init__(
         self,
@@ -77,15 +115,11 @@ class YOLODataset(Dataset):
         return len(self.image_paths)
 
     def __getitem__(self, idx: int) -> dict:
-        """
-        Returns a dictionary with 'image', 'labels', and 'path'.
-        'image' is a (C, H, W) float tensor normalized to [0, 1].
-        'labels' is a (N, 5) tensor: [class_id, x_c, y_c, w, h].
-        """
+        """Returns a dictionary with 'image', 'labels', and 'path'."""
         img_path = self.image_paths[idx]
         label_path = self.labels_dir / (img_path.stem + ".txt")
 
-        # --- Image Loading (Real Implementation) ---
+        # Image Loading
         img = cv2.imread(str(img_path))
         if img is None:
             raise FileNotFoundError(f"Could not load image: {img_path}")
@@ -93,7 +127,7 @@ class YOLODataset(Dataset):
         img = cv2.resize(img, (640, 640))
         image = torch.from_numpy(img).permute(2, 0, 1).float() / 255.0
 
-        # --- Label Loading ---
+        # Label Loading
         labels = []
         if label_path.exists():
             with open(label_path, "r") as f:
@@ -105,9 +139,7 @@ class YOLODataset(Dataset):
         
         labels_tensor = torch.tensor(labels, dtype=torch.float32) if labels else torch.zeros((0, 5))
 
-        # --- Transforms ---
         if self.transform:
-            # Transforms should handle both image and labels (e.g., Albumentations).
             image, labels_tensor = self.transform(image, labels_tensor)
 
         return {
