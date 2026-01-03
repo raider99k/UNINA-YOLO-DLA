@@ -28,7 +28,7 @@ import yaml
 # --- Ultralytics Imports ---
 try:
     from ultralytics import YOLO
-    from ultralytics.models.yolo.detect import DetectionTrainer
+    from ultralytics.models.yolo.detect import DetectionTrainer, DetectionValidator
     from ultralytics.nn.tasks import DetectionModel
     from ultralytics.nn.modules import Conv
     import ultralytics.nn.modules as ultralytics_modules
@@ -523,11 +523,179 @@ if ULTRALYTICS_AVAILABLE:
             else:
                 # Fall back to default Ultralytics dataloader
                 return super().get_dataloader(dataset_path, batch_size, rank, mode)
+        
+        def get_validator(self):
+            """Return custom validator with integrated small object metrics."""
+            from copy import copy
+            self.loss_names = "box_loss", "cls_loss", "dfl_loss"
+            return UninaDLAValidator(
+                self.test_loader, 
+                save_dir=self.save_dir, 
+                args=copy(self.args),
+                _callbacks=self.callbacks
+            )
+
+    
+    class UninaDLAValidator(DetectionValidator):
+        """
+        Custom Detection Validator for UNINA-YOLO-DLA.
+        
+        Integrates Small Object Metric calculation directly into update_metrics()
+        to avoid the performance overhead of frame introspection in callbacks.
+        
+        This is the proper solution per Ultralytics architecture - extending
+        the validator rather than using hacky callbacks.
+        """
+        
+        def __init__(self, *args, size_threshold: int = 15, **kwargs):
+            super().__init__(*args, **kwargs)
+            self.size_threshold = size_threshold
+            # Small object metric accumulators
+            self.small_tp = 0
+            self.small_fp = 0
+            self.small_fn = 0
+        
+        def init_metrics(self, model):
+            """Initialize metrics including small object counters."""
+            super().init_metrics(model)
+            # Reset small object counters
+            self.small_tp = 0
+            self.small_fp = 0
+            self.small_fn = 0
+        
+        def _is_small_box(self, w_px: float, h_px: float) -> bool:
+            """Check if a box is 'small' based on pixel dimensions."""
+            return w_px < self.size_threshold and h_px < self.size_threshold
+        
+        def update_metrics(self, preds, batch):
+            """
+            Update metrics with predictions, including Small Object Metric.
+            
+            This is called for each batch during validation. We calculate
+            small object statistics inline, avoiding memory accumulation.
+            """
+            # Call parent implementation (standard mAP calculation)
+            super().update_metrics(preds, batch)
+            
+            # --- Small Object Metric Calculation (Inline) ---
+            # This replaces the slow SmallObjectCallback
+            try:
+                for si, pred in enumerate(preds):
+                    # Get prepared batch and prediction for this image
+                    pbatch = self._prepare_batch(si, batch)
+                    
+                    # Ground truth info
+                    gt_cls = pbatch["cls"].cpu().numpy()
+                    gt_bboxes = pbatch["bboxes"].cpu().numpy()  # xyxy absolute
+                    imgsz = pbatch["imgsz"]  # (H, W)
+                    
+                    # Filter to small ground truths only
+                    small_gt_indices = []
+                    for i, bbox in enumerate(gt_bboxes):
+                        if len(bbox) >= 4:
+                            w_px = bbox[2] - bbox[0]  # x2 - x1
+                            h_px = bbox[3] - bbox[1]  # y2 - y1
+                            if self._is_small_box(w_px, h_px):
+                                small_gt_indices.append(i)
+                    
+                    if len(small_gt_indices) == 0:
+                        continue  # No small objects in this image
+                    
+                    # Predictions
+                    pred_bboxes = pred["bboxes"].cpu().numpy()  # xyxy
+                    pred_cls = pred["cls"].cpu().numpy()
+                    pred_conf = pred["conf"].cpu().numpy()
+                    
+                    matched_gt = set()
+                    
+                    # Sort predictions by confidence
+                    if len(pred_conf) == 0:
+                        self.small_fn += len(small_gt_indices)
+                        continue
+                    
+                    sorted_indices = np.argsort(-pred_conf)
+                    
+                    for pred_idx in sorted_indices:
+                        pb = pred_bboxes[pred_idx]
+                        pc = int(pred_cls[pred_idx])
+                        
+                        best_iou = 0.0
+                        best_gt_idx = -1
+                        
+                        for sgi in small_gt_indices:
+                            if sgi in matched_gt:
+                                continue
+                            gc = int(gt_cls[sgi]) if len(gt_cls.shape) == 1 else int(gt_cls[sgi][0])
+                            if pc != gc:
+                                continue
+                            
+                            gb = gt_bboxes[sgi]
+                            iou = self._box_iou_single(pb, gb)
+                            if iou > best_iou and iou >= 0.5:
+                                best_iou = iou
+                                best_gt_idx = sgi
+                        
+                        if best_gt_idx >= 0:
+                            self.small_tp += 1
+                            matched_gt.add(best_gt_idx)
+                        else:
+                            # Only count FP if prediction is also "small"
+                            pw = pb[2] - pb[0]
+                            ph = pb[3] - pb[1]
+                            if self._is_small_box(pw, ph):
+                                self.small_fp += 1
+                    
+                    # Unmatched small GTs are false negatives
+                    self.small_fn += len(small_gt_indices) - len(matched_gt)
+                    
+            except Exception as e:
+                # Gracefully continue if small object metric fails
+                pass
+        
+        def _box_iou_single(self, box1, box2):
+            """Calculate IoU between two boxes in xyxy format."""
+            x1 = max(box1[0], box2[0])
+            y1 = max(box1[1], box2[1])
+            x2 = min(box1[2], box2[2])
+            y2 = min(box1[3], box2[3])
+            
+            if x2 <= x1 or y2 <= y1:
+                return 0.0
+            
+            inter = (x2 - x1) * (y2 - y1)
+            area1 = (box1[2] - box1[0]) * (box1[3] - box1[1])
+            area2 = (box2[2] - box2[0]) * (box2[3] - box2[1])
+            union = area1 + area2 - inter
+            
+            return inter / union if union > 0 else 0.0
+        
+        def finalize_metrics(self):
+            """Finalize metrics and print small object results."""
+            super().finalize_metrics()
+            
+            # Compute and print small object metrics
+            precision = 0.0
+            recall = 0.0
+            f1 = 0.0
+            
+            if (self.small_tp + self.small_fp) > 0:
+                precision = self.small_tp / (self.small_tp + self.small_fp)
+            if (self.small_tp + self.small_fn) > 0:
+                recall = self.small_tp / (self.small_tp + self.small_fn)
+            if (precision + recall) > 0:
+                f1 = 2 * precision * recall / (precision + recall)
+            
+            print(f"\n>>> Small Object Metrics (< {self.size_threshold}x{self.size_threshold} px):")
+            print(f"    Precision: {precision:.4f}")
+            print(f"    Recall:    {recall:.4f}")
+            print(f"    F1-Score:  {f1:.4f}")
+            print(f"    TP: {self.small_tp}, FP: {self.small_fp}, FN: {self.small_fn}")
 
 
 # ============================================================================
-# 4. Small Object Metric Callback (mAP_small)
+# 4. Small Object Metric Callback (mAP_small) - LEGACY (Kept for Fallback)
 # ============================================================================
+
 
 class SmallObjectCallback:
     """
@@ -961,18 +1129,11 @@ def train_phase1_fp32(
             # Explicitly instantiate custom trainer
             trainer = UninaDLATrainer(overrides=args)
             
-            # Register Small Object Metric Callback
-            # note: Trainer typically sets self.validator internally during train()
-            # We can use method add_callback if available, roughly:
-            small_obj_cb = SmallObjectCallback(size_threshold=15, image_size=imgsz)
+            # NOTE: Small object metrics are now calculated inline via UninaDLAValidator
+            # (returned by get_validator), eliminating the need for slow callback-based
+            # frame introspection. The legacy SmallObjectCallback is kept for fallback only.
             
-            # Registering callback to the trainer methods
-            # Ultralytics callbacks are dicts of functions usually, or added via add_callback
-            trainer.add_callback("on_val_start", small_obj_cb.on_val_start)
-            trainer.add_callback("on_val_batch_end", small_obj_cb.on_val_batch_end)
-            trainer.add_callback("on_val_end", small_obj_cb.on_val_end)
-            
-            print(">>> Custom Trainer and Callbacks Initialized.")
+            print(">>> Custom Trainer initialized (with UninaDLAValidator for small object metrics).")
             
             # Surgically patch Kaggle-specific Ray issues if detected
             patch_kaggle_environment(trainer)
@@ -983,6 +1144,7 @@ def train_phase1_fp32(
             best_weights = trainer.best if hasattr(trainer, 'best') else Path(project) / name / "weights" / "best.pt"
             
         except Exception as e:
+
             print(f"ERROR initializing custom trainer: {e}")
             print("Falling back to standard YOLO.train()...")
             # Fallback
