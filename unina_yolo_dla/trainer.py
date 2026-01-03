@@ -217,3 +217,7 @@ class UninaDLAValidator(DetectionValidator):
             stats["metrics/small_recall"] = recall
             stats["metrics/small_f1"] = f1
         return stats
+
+# --- Global Initialization ---
+# Apply patches automatically on import to support DDP worker processes
+apply_dla_patches()

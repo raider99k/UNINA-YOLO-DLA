@@ -16,6 +16,7 @@ nc: 4
 # Scaling factors
 depth_multiple: 0.50
 width_multiple: 1.00  # Channels are now explicitly scaled in config
+scale: m             # Fixes UnboundLocalError: scale in Ultralytics parser
 
 # NOTE: Activation is set to ReLU at runtime via train.py replace_silu_with_relu()
 # This is required for DLA compatibility (SiLU not supported on DLA)
