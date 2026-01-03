@@ -1297,7 +1297,6 @@ def train_phase2_qat(
     print(">>> Running Entropy calibration (Lightweight)...")
     
     # Parse data yaml to get validation path
-    import yaml
     with open(data_yaml, 'r') as f:
         data_cfg = yaml.safe_load(f)
         
