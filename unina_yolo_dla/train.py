@@ -1300,14 +1300,17 @@ def train_phase2_qat(
     with open(data_yaml, 'r') as f:
         data_cfg = yaml.safe_load(f)
         
-    # Prefer val/test/train in that order
-    calib_path = data_cfg.get('val') or data_cfg.get('test') or data_cfg.get('train')
-    if isinstance(calib_path, list): calib_path = calib_path[0] # Handle list paths
+    # Resolve paths relative to YAML's 'path' key (standard Ultralytics format)
+    base_path = Path(data_cfg.get('path', Path(data_yaml).parent))
+    calib_rel = data_cfg.get('val') or data_cfg.get('test') or data_cfg.get('train')
+    if isinstance(calib_rel, list): calib_rel = calib_rel[0]
+    calib_path = base_path / calib_rel if calib_rel else base_path
+    print(f">>> Calibration path resolved to: {calib_path}")
     
     # Create lightweight dataloader
     from qat import collect_calibration_stats
     calib_loader = create_active_learning_dataloader(
-        dataset_root=calib_path,
+        dataset_root=str(calib_path),
         batch_size=batch_size,
         num_workers=workers,
         difficulty_scores=None, # No weighting needed for calibration
