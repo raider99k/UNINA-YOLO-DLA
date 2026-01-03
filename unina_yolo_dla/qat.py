@@ -30,6 +30,35 @@ import torch
 import torch.nn as nn
 from typing import Optional
 
+def suppress_quantization_logs() -> None:
+    """
+    Silences the extreme log spam from pytorch-quantization and absl.
+    
+    This suppresses messages like:
+    - 'Fake quantize mode doesn't use scale explicitly!'
+    - 'step_size is undefined under dynamic amax mode!'
+    
+    This must be called in every process (main and DDP workers).
+    """
+    import logging
+    import warnings
+    
+    # 1. Suppress standard logging for the quantization package
+    logging.getLogger('pytorch_quantization').setLevel(logging.CRITICAL)
+    
+    # 2. Suppress specific warnings from PyTorch/NVIDIA
+    warnings.filterwarnings('ignore', message='.*Fake quantize mode.*')
+    warnings.filterwarnings('ignore', message='.*step_size is undefined.*')
+    
+    # 3. Suppress absl logs (the E0103... messages)
+    try:
+        from absl import logging as absl_logging
+        # This prevents the flood of 'Fake quantize mode doesn't use scale explicitly'
+        # We set it to FATAL to hide the per-layer Error messages that are actually warnings
+        absl_logging.set_verbosity(absl_logging.FATAL)
+    except ImportError:
+        pass
+
 # Try to import NVIDIA's pytorch-quantization toolkit
 try:
     from pytorch_quantization import quant_modules
@@ -38,22 +67,8 @@ try:
     from pytorch_quantization import calib
     QUANT_AVAILABLE = True
     
-    # --- Log Suppression for pytorch-quantization ---
-    import logging
-    from absl import logging as absl_logging
-    
-    # 1. Suppress absl logs (the E0103... messages)
-    # This prevents the flood of 'Fake quantize mode doesn't use scale explicitly'
-    # We set it to FATAL to hide the per-layer Error messages that are actually warnings
-    absl_logging.set_verbosity(absl_logging.FATAL)
-    
-    # 2. Suppress standard logging for the quantization package
-    logging.getLogger('pytorch_quantization').setLevel(logging.CRITICAL)
-    
-    # 3. Suppress specific warnings from PyTorch/NVIDIA
-    import warnings
-    warnings.filterwarnings('ignore', message='.*Fake quantize mode.*')
-    warnings.filterwarnings('ignore', message='.*step_size is undefined.*')
+    # Apply suppression immediately for single-process usage
+    suppress_quantization_logs()
     
 except ImportError:
     QUANT_AVAILABLE = False

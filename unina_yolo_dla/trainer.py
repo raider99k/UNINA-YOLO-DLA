@@ -55,11 +55,14 @@ def apply_dla_patches():
     # We must initialize quantization BEFORE building any model in the worker.
     if os.environ.get('UNINA_DLA_QAT') == '1':
         try:
+             from qat import suppress_quantization_logs
              from pytorch_quantization import quant_modules
              if not getattr(quant_modules, '_dla_initialized', False):
+                 # Silence logs before initialization
+                 suppress_quantization_logs()
                  quant_modules.initialize()
                  quant_modules._dla_initialized = True
-                 print(">>> QAT Patch: Initialized quantization modules in worker/process.")
+                 print(">>> QAT Patch: Initialized quantization modules in worker/process (logs suppressed).")
         except ImportError:
              pass
 
