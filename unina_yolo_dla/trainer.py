@@ -41,20 +41,31 @@ def apply_dla_patches():
     setattr(ultralytics_tasks, 'SPPF_DLA', SPPF_DLA)
     ultralytics_tasks.__dict__['SPPF_DLA'] = SPPF_DLA
 
-    # 2. Robust Wrapper Patch for parse_model
-    # This fixes "UnboundLocalError: scale" by ensuring scale exists in the dict
-    if not hasattr(ultralytics_tasks, '_unina_patched'):
-        original_parse_model = ultralytics_tasks.parse_model
+    # 2. Patch parse_model to fix UnboundLocalError: 'scale'
+    # This must be a source-injection patch because 'scale' is used as a local variable
+    # inside parse_model, and a simple function wrapper cannot inject local variables.
+    try:
+        import ultralytics.nn.tasks as tasks
+        source = inspect.getsource(tasks.parse_model)
         
-        def patched_parse_model(d, ch, verbose=True):
-            if isinstance(d, dict) and 'scale' not in d:
-                # Inject scale if missing to prevent UnboundLocalError in Ultralytics
-                d['scale'] = 'm' 
-            return original_parse_model(d, ch, verbose)
-            
-        ultralytics_tasks.parse_model = patched_parse_model
-        ultralytics_tasks._unina_patched = True
-        print(">>> Monkey-Patch applied: Wrapped 'parse_model' to ensure 'scale' existence.")
+        # Check if already patched to avoid recursion/double-patching
+        if "PATCH INJECTED" not in source:
+             split_marker = 'max_channels = float("inf")'
+             if split_marker in source:
+                 parts = source.split(split_marker)
+                 # Inject scale initialization right after max_channels
+                 source = parts[0] + split_marker + '\n    scale = d.get("scale")\n    if scale is None: scale = "m" # PATCH INJECTED' + parts[1]
+                 
+                 # Redefine the function in the tasks module namespace
+                 exec(source, tasks.__dict__)
+                 print(">>> Monkey-Patch applied: Injected 'scale' initialization in parse_model body.")
+             else:
+                 # Fallback: try to inject at the very beginning of the function
+                 source = source.replace('):', '):\n    scale = d.get("scale")\n    if scale is None: scale = "m" # PATCH INJECTED', 1)
+                 exec(source, tasks.__dict__)
+                 print(">>> Monkey-Patch applied: Injected 'scale' at function start (fallback).")
+    except Exception as e:
+        print(f">>> WARNING: Failed to apply source-injection monkey-patch: {e}")
 
 # ============================================================================
 # 2. Custom DLA Modules
