@@ -144,14 +144,27 @@ def collect_calibration_stats(
         print("Skipping calibration - pytorch-quantization not available.")
         return
     
+    # Robust device resolution: '0' -> 'cuda:0', 'cpu' -> 'cpu'
+    if isinstance(device, str) and device.isdigit():
+        device = f"cuda:{device}"
+    
     model.eval()
     model.to(device)
     enable_calibration(model)
     
     with torch.no_grad():
-        for i, (images, _) in enumerate(calibration_dataloader):
+        for i, batch in enumerate(calibration_dataloader):
             if i >= num_batches:
                 break
+            
+            # Calibration dataloader can return (images, labels) tuple or dict
+            if isinstance(batch, dict):
+                images = batch.get("images") or batch.get("image")
+            else:
+                images = batch[0]
+                
+            if images is None: continue
+            
             images = images.to(device)
             model(images)
             if (i + 1) % 10 == 0:
