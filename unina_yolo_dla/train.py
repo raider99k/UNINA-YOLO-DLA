@@ -1292,9 +1292,32 @@ def train_phase2_qat(
     if hasattr(model, 'model'):
         set_layer_precision_fp16(model.model, fp16_layers)
     
-    # Calibration step (run a few batches in eval mode to collect statistics)
-    print(">>> Running Entropy calibration...")
-    model.val(data=data_yaml, imgsz=imgsz, batch=batch_size // 2)
+    # Calibration step (run lower-overhead forward passes)
+    print(">>> Running Entropy calibration (Lightweight)...")
+    
+    # Parse data yaml to get validation path
+    import yaml
+    with open(data_yaml, 'r') as f:
+        data_cfg = yaml.safe_load(f)
+        
+    # Prefer val/test/train in that order
+    calib_path = data_cfg.get('val') or data_cfg.get('test') or data_cfg.get('train')
+    if isinstance(calib_path, list): calib_path = calib_path[0] # Handle list paths
+    
+    # Create lightweight dataloader
+    from qat import collect_calibration_stats
+    calib_loader = create_active_learning_dataloader(
+        dataset_root=calib_path,
+        batch_size=batch_size,
+        num_workers=workers,
+        difficulty_scores=None, # No weighting needed for calibration
+    )
+    
+    # Run calibration on the underlying pytorch model
+    if hasattr(model, 'model'):
+        collect_calibration_stats(model.model, calib_loader, num_batches=30, device=device)
+    else:
+        collect_calibration_stats(model, calib_loader, num_batches=30, device=device)
     
     # Fine-tune with QAT
     print(">>> Starting QAT fine-tuning...")

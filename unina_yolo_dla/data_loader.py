@@ -174,34 +174,54 @@ def create_active_learning_dataloader(
     Returns:
         A configured PyTorch DataLoader.
     """
-    dataset = YOLODataset(dataset_root, transform=transform)
+    if ULTRALYTICS_DATASET_AVAILABLE:
+        # Use optimized dataset if available
+        # Note: Ultralytics dataset takes 'img_path' (root dir) as first arg
+        dataset = ActiveLearningDataset(
+            img_path=str(dataset_root),
+            difficulty_scores=difficulty_scores,
+            data=dict(names={0: 'yellow_cone', 1: 'blue_cone', 2: 'orange_cone', 3: 'large_orange_cone'}), # Minimal config
+            augment=True,
+            rect=False, # Active learning usually prefers square training
+        )
+    else:
+        # Fallback to legacy
+        dataset = YOLODataset(dataset_root, transform=transform)
+
     total_samples = len(dataset)
-
-    # Default weights: uniform
-    sample_weights = [1.0] * total_samples
-
-    if difficulty_scores:
-        # Assign weights based on difficulty scores
-        # We normalize scores to use as sampling probabilities
-        sample_weights = []
-        for img_path in dataset.image_paths:
-            # Score could be Entropy, Loss, or custom uncertainty metric
-            score = difficulty_scores.get(str(img_path), 1.0)
-            sample_weights.append(score)
-
+    
+    # 2. Compute Weights Efficiently
+    if ULTRALYTICS_DATASET_AVAILABLE and isinstance(dataset, ActiveLearningDataset):
+        # Use optimized get_all_weights
+        sample_weights = dataset.get_all_weights()
+    else:
+        # Legacy weight calculation
+        sample_weights = [1.0] * total_samples
+        if difficulty_scores:
+           # ... legacy logic ...
+           for i in range(total_samples):
+               img_path = str(dataset.image_paths[i]) if hasattr(dataset, 'image_paths') else ""
+               sample_weights[i] = difficulty_scores.get(img_path, 1.0)
+    
+    # 3. Create Weighted Sampler
     sampler = WeightedRandomSampler(
         weights=sample_weights,
         num_samples=total_samples,
         replacement=True,
     )
 
+    # 4. Create DataLoader with workers propagation
+    # Ultralytics dataset handles collate_fn internally or needs standard?
+    # Ultralytics usually uses build_dataloader, but we are manually wrapping for sampler control.
+    # If using ActiveLearningDataset (which inherits from YOLODataset), it implements __getitem__ returning dict
+    
     return DataLoader(
         dataset,
         batch_size=batch_size,
         sampler=sampler,
-        num_workers=num_workers,
-        collate_fn=collate_fn,
+        num_workers=num_workers, # Propagated from CLI
         pin_memory=True,
+        collate_fn=getattr(dataset, 'collate_fn', None), # Use dataset's collate if available
     )
 
 
