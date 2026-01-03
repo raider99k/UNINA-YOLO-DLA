@@ -191,6 +191,7 @@ class SmallObjectCallback:
         """Vectorized batch stats calculation (Production-ready)."""
         try:
             from ultralytics.utils import ops
+            from ultralytics.utils.metrics import box_iou
             tp_total, fp_total, fn_total = 0, 0, 0
             
             # preds is usually a list of dicts or tensors
@@ -224,7 +225,7 @@ class SmallObjectCallback:
                     continue
                 
                 # Vectorized matching
-                iou = ops.box_iou(p_bboxes, small_gt_xyxy)
+                iou = box_iou(p_bboxes, small_gt_xyxy)
                 match = (iou >= 0.5) & (p_cls.view(-1, 1) == small_gt_cls.view(1, -1))
                 
                 m_gt = torch.zeros(n_small_gt, dtype=torch.bool, device=device)

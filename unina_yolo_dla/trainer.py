@@ -156,6 +156,7 @@ class UninaDLAValidator(DetectionValidator):
         super().update_metrics(preds, batch)
         try:
             from ultralytics.utils import ops
+            from ultralytics.utils.metrics import box_iou
             if "bboxes" not in batch or batch["bboxes"].numel() == 0: return
             
             for si, pred in enumerate(preds):
@@ -187,7 +188,7 @@ class UninaDLAValidator(DetectionValidator):
                     self.small_fn += num_small_gt
                     continue
                     
-                iou_matrix = ops.box_iou(p_bboxes, small_gt_xyxy)
+                iou_matrix = box_iou(p_bboxes, small_gt_xyxy)
                 cls_match = p_cls.view(-1, 1) == small_gt_cls.view(1, -1)
                 match_matrix = (iou_matrix > 0.45) & cls_match
                 
