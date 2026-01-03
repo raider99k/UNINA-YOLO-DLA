@@ -785,6 +785,12 @@ def train_phase2_qat(
         exist_ok=True,
         lr0=0.001,        # Reduced LR for fine-tuning
         warmup_epochs=0,  # No warmup for QAT
+        amp=False,        # CRITICAL: QAT FakeQuant is unstable in FP16/AMP
+        ema=False,        # CRITICAL: EMA can track quantization noise
+        mosaic=0.0,       # Disable mosaic for fine-tuning
+        mixup=0.0,        # Disable mixup for fine-tuning
+        copy_paste=0.0,   # Disable copy-paste
+        fp16_layers=fp16_layers, # Pass explicit config for persistence
     )
     
     try:
