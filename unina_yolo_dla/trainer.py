@@ -25,47 +25,61 @@ except ImportError:
     DATA_LOADER_AVAILABLE = False
 
 # ============================================================================
-# 1. Monkey-Patching logic
+# 1. Monkey-Patching logic & DDP Compatibility
 # ============================================================================
 
 def apply_dla_patches():
     """
     Apply global patches to Ultralytics and register custom modules.
     Must be called at the start of any process (including DDP nodes).
+    
+    This implementation uses robust function wrapping instead of source injection
+    to ensure 100% compatibility with DDP and environments where source code
+    may not be available.
     """
     if not ULTRALYTICS_AVAILABLE:
         return
 
-    # 1. Register SPPF_DLA
-    setattr(ultralytics_modules, 'SPPF_DLA', SPPF_DLA)
-    setattr(ultralytics_tasks, 'SPPF_DLA', SPPF_DLA)
-    ultralytics_tasks.__dict__['SPPF_DLA'] = SPPF_DLA
+    # A. Surgically fix Ray Tube Session (Kaggle/Server DDP robustness)
+    # Ref: Ray 2.x renamed _get_session to get_session
+    try:
+        import ray.train._internal.session as ray_session
+        if hasattr(ray_session, 'get_session') and not hasattr(ray_session, '_get_session'):
+            ray_session._get_session = ray_session.get_session
+            print(">>> Ray Patch: Mapped _get_session to get_session.")
+    except (ImportError, AttributeError):
+        pass
 
-    # 2. Patch parse_model to fix UnboundLocalError: 'scale'
-    # This must be a source-injection patch because 'scale' is used as a local variable
-    # inside parse_model, and a simple function wrapper cannot inject local variables.
+    # B. Register SPPF_DLA
+    if not hasattr(ultralytics_modules, 'SPPF_DLA'):
+        setattr(ultralytics_modules, 'SPPF_DLA', SPPF_DLA)
+        setattr(ultralytics_tasks, 'SPPF_DLA', SPPF_DLA)
+        ultralytics_tasks.__dict__['SPPF_DLA'] = SPPF_DLA
+
+    # C. Robust parse_model Patch (Wrapper-based)
+    # Using a wrapper is production-ready as it doesn't modify source files
+    # and handles local variable initialization by augmenting the input dict.
     try:
         import ultralytics.nn.tasks as tasks
-        source = inspect.getsource(tasks.parse_model)
         
-        # Check if already patched to avoid recursion/double-patching
-        if "PATCH INJECTED" not in source:
-             split_marker = 'max_channels = float("inf")'
-             if split_marker in source:
-                 parts = source.split(split_marker)
-                 # Inject scale initialization right after max_channels
-                 source = parts[0] + split_marker + '\n    scale = d.get("scale")\n    if scale is None: scale = "m" # PATCH INJECTED' + parts[1]
-                 
-                 # Redefine the function in the tasks module namespace
-                 exec(source, tasks.__dict__)
-                 print(">>> Monkey-Patch applied: Injected 'scale' initialization in parse_model body.")
-             else:
-                 # Fallback: try to inject at the very beginning of the function
-                 source = source.replace('):', '):\n    scale = d.get("scale")\n    if scale is None: scale = "m" # PATCH INJECTED', 1)
-                 exec(source, tasks.__dict__)
-                 print(">>> Monkey-Patch applied: Injected 'scale' at function start (fallback).")
+        # Check if already wrapped to avoid infinite recursion
+        if not hasattr(tasks.parse_model, '_dla_wrapped'):
+            original_parse_model = tasks.parse_model
+            
+            def parse_model_wrapper(d, ch, verbose=True):
+                """Wrapper to ensure 'scale' is present in the config dict."""
+                # Ensure 'scale' exists in the config dictionary to satisfy the parser
+                if isinstance(d, dict) and 'scale' not in d:
+                    d['scale'] = 'm'  # Default to medium if missing
+                return original_parse_model(d, ch, verbose)
+            
+            # Mark as wrapped and replace
+            parse_model_wrapper._dla_wrapped = True
+            tasks.parse_model = parse_model_wrapper
+            print(">>> Monkey-Patch applied: Wrapper-based parse_model patch (DDP Ready).")
+            
     except Exception as e:
-        print(f">>> WARNING: Failed to apply source-injection monkey-patch: {e}")
+        print(f">>> WARNING: Failed to apply robust monkey-patch: {e}")
 
 # ============================================================================
 # 2. Custom DLA Modules
