@@ -222,15 +222,27 @@ class UninaDLAValidator(DetectionValidator):
                     self.small_fn += num_small_gt
                     continue
                     
+                # 4. Small Predictions filtering (must be small to be counted in small metrics)
+                pw, ph = p_bboxes[:, 2] - p_bboxes[:, 0], p_bboxes[:, 3] - p_bboxes[:, 1]
+                small_p_mask = (pw < self.size_threshold) & (ph < self.size_threshold)
+                num_small_p = small_p_mask.sum().item()
+                
+                # 5. Matching Logic for Small Objects
                 iou_matrix = box_iou(p_bboxes, small_gt_xyxy)
                 cls_match = p_cls.view(-1, 1) == small_gt_cls.view(1, -1)
                 match_matrix = (iou_matrix > 0.45) & cls_match
                 
+                # TP_small: Small GTs successfully detected by ANY prediction
                 matched_gt = match_matrix.any(dim=0)
                 tp = matched_gt.sum().item()
                 self.small_tp += tp
                 self.small_fn += (num_small_gt - tp)
-                self.small_fp += (match_matrix.any(dim=1).sum().item() - tp)
+                
+                # FP_small: Small Predictions that failed to match a small GT
+                # (Note: In strict COCO, a small pred matching a large GT is also an FP_small)
+                matched_p = match_matrix[small_p_mask].any(dim=1)
+                fp = num_small_p - matched_p.sum().item()
+                self.small_fp += fp
         except Exception as e:
             print(f"WARNING: Error in small object metrics: {e}")
 

@@ -55,10 +55,18 @@ def suppress_quantization_logs() -> None:
     # 3. Suppress absl logs (the E0103... messages)
     try:
         from absl import logging as absl_logging
+        # Force absl to use its internal handler if not initialized
+        if not hasattr(absl_logging, '_absl_handler'):
+            absl_logging.use_absl_handler()
+            
         # This prevents the flood of 'Fake quantize mode doesn't use scale explicitly'
-        # We set it to FATAL to hide the per-layer Error messages that are actually warnings
         absl_logging.set_verbosity(absl_logging.FATAL)
-    except ImportError:
+        absl_logging.set_stderrthreshold(absl_logging.FATAL)
+        
+        # Stop propagation to root logger to avoid double logging
+        logging.getLogger('pytorch_quantization').propagate = False
+        
+    except (ImportError, AttributeError):
         pass
 
 # Try to import NVIDIA's pytorch-quantization toolkit
@@ -650,26 +658,19 @@ def _paths_match(fp32_path: str, qat_path: str) -> bool:
     """
     Check if two module paths refer to the same logical layer.
     
-    Handles differences like:
-    - 'backbone.stem.conv' vs 'backbone.stem.conv'
-    - 'stem.0.conv' vs 'stem.conv'
-    - 'layer1.conv' vs 'layer1.0.conv'
+    Handles quantization wrappers while strictly preserving indices
+    to avoid cross-layer contamination in deep architectures.
     """
     if fp32_path == qat_path:
         return True
     
-    # Split into components
-    fp32_parts = [p for p in fp32_path.split(".") if p]
-    qat_parts = [p for p in qat_path.split(".") if p]
+    def normalize(p):
+        # Remove quantization wrappers but KEEP indices
+        for segment in ["._input_quantizer", "._weight_quantizer", "._output_quantizer"]:
+            p = p.replace(segment, "")
+        return p
     
-    # Remove numeric indices for comparison
-    def strip_indices(parts: list[str]) -> list[str]:
-        return [p for p in parts if not p.isdigit()]
-    
-    fp32_stripped = strip_indices(fp32_parts)
-    qat_stripped = strip_indices(qat_parts)
-    
-    return fp32_stripped == qat_stripped
+    return normalize(fp32_path) == normalize(qat_path)
 
 
 def configure_entropy_calibration() -> None:
