@@ -37,6 +37,24 @@ try:
     from pytorch_quantization.tensor_quant import QuantDescriptor
     from pytorch_quantization import calib
     QUANT_AVAILABLE = True
+    
+    # --- Log Suppression for pytorch-quantization ---
+    import logging
+    from absl import logging as absl_logging
+    
+    # 1. Suppress absl logs (the E0103... messages)
+    # This prevents the flood of 'Fake quantize mode doesn't use scale explicitly'
+    # We set it to FATAL to hide the per-layer Error messages that are actually warnings
+    absl_logging.set_verbosity(absl_logging.FATAL)
+    
+    # 2. Suppress standard logging for the quantization package
+    logging.getLogger('pytorch_quantization').setLevel(logging.CRITICAL)
+    
+    # 3. Suppress specific warnings from PyTorch/NVIDIA
+    import warnings
+    warnings.filterwarnings('ignore', message='.*Fake quantize mode.*')
+    warnings.filterwarnings('ignore', message='.*step_size is undefined.*')
+    
 except ImportError:
     QUANT_AVAILABLE = False
     print("WARNING: pytorch-quantization not found. QAT features disabled.")

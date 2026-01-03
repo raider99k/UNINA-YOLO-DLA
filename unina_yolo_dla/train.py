@@ -573,6 +573,12 @@ def train_phase1_fp32(
             # Retrieve best weight path from trainer state
             best_weights = trainer.best if hasattr(trainer, 'best') else Path(project) / name / "weights" / "best.pt"
             
+            # Phase 1 Cleanup: Free memory and kill dataloader threads to avoid ConnectionResetError
+            del trainer
+            import gc
+            gc.collect()
+            torch.cuda.empty_cache()
+            
         except Exception as e:
 
             print(f"ERROR initializing custom trainer: {e}")
