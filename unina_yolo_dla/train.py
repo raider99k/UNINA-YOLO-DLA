@@ -736,7 +736,8 @@ def train_phase2_qat(
     os.environ['UNINA_DLA_QAT'] = '1'
     
     # Save a temporary checkpoint to preserve QAT structure and calibrated stats for DDP workers
-    temp_qat_dir = Path(project) / name
+    # We save it in the project root instead of the 'name' subdir to avoid trainer cleanup issues
+    temp_qat_dir = Path(project).resolve()
     temp_qat_dir.mkdir(parents=True, exist_ok=True)
     temp_qat_path = temp_qat_dir / "qat_init_calibrated.pt"
     
@@ -747,7 +748,16 @@ def train_phase2_qat(
         'names': full_names,
         'date': datetime.now().isoformat(),
     }, str(temp_qat_path))
-    print(f">>> QAT calibrated model saved for DDP workers: {temp_qat_path}")
+    
+    # Crucial for Kaggle/Cloud environments: Wait for file system synchronization
+    import time
+    time.sleep(2)
+    
+    if not temp_qat_path.exists():
+        print(f"\u003e\u003e\u003e ERROR: Failed to save temporary QAT model to {temp_qat_path}")
+        # Continue anyway, let it fail at training if needed
+    else:
+        print(f"\u003e\u003e\u003e QAT calibrated model saved for DDP workers: {temp_qat_path}")
     
     # Training arguments for UninaDLATrainer
     qat_args = dict(
