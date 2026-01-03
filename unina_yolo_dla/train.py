@@ -1068,12 +1068,16 @@ def train_phase2_qat(
     # We must use the same nc as FP32 to ensure head weights can be transferred
     with open(model_yaml, 'r') as f:
         cfg = yaml.safe_load(f)
-    if cfg['nc'] != full_nc:
-        print(f">>> Synchronizing QAT model nc: {cfg['nc']} -> {full_nc}")
-        cfg['nc'] = full_nc
     
-    qat_model = YOLO(cfg)
+    print(f">>> Synchronizing QAT model with FP32 metadata (nc={full_nc})")
+    cfg['nc'] = full_nc
+    
+    # Initialize YOLO with the YAML path first (YOLO wrapper requires a string/Path)
+    qat_model = YOLO(model_yaml)
+    # Then overwrite with the correctly-scaled DetectionModel
+    qat_model.model = DetectionModel(cfg, nc=full_nc, verbose=False)
     qat_model.names = full_names
+    qat_model.model.names = full_names
     
     if hasattr(qat_model, 'model'):
         replace_silu_with_relu(qat_model.model)
