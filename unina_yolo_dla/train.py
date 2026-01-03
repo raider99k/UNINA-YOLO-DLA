@@ -753,7 +753,7 @@ def train_phase2_qat(
         'nc': full_nc,
         'names': full_names,
         'date': datetime.now().isoformat(),
-    }, str(temp_qat_path))
+    }, str(temp_qat_path), _use_new_zipfile_serialization=False)
     
     # Crucial for Kaggle/Cloud environments: Wait for file system synchronization
     import time
@@ -820,6 +820,21 @@ def export_to_onnx(
     print("=" * 60)
     
     model = YOLO(weights_path)
+    
+    # Handle QAT-specific export if needed
+    if int8 and QAT_AVAILABLE:
+        try:
+             # Check if model actually has quantization nodes
+             has_quant = any('QuantConv2d' in str(type(m)) for m in model.model.modules())
+             if has_quant:
+                 print(">>> Detected QAT model. Using specialized QAT ONNX export...")
+                 from qat import export_qat_onnx
+                 out_path = Path(output_dir) / "qat_model.onnx"
+                 out_path.parent.mkdir(parents=True, exist_ok=True)
+                 export_qat_onnx(model.model, str(out_path), input_size=imgsz)
+                 return str(out_path)
+        except Exception as e:
+             print(f">>> WARNING: Specialized QAT export failed ({e}). Falling back to standard export.")
     
     export_path = model.export(
         format="onnx",

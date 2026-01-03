@@ -722,20 +722,33 @@ def set_layer_precision_fp16(model: nn.Module, layer_names: list) -> None:
     disabled_count = 0
     for name, module in model.named_modules():
         # Check if this layer matches any of the patterns
+        # 1. Custom class matches (e.g. 'head_p2')
+        # 2. Standard YOLOv8/v11 matches (e.g. '0' for stem, '4' or '6' for initial stages)
+        is_target = False
         for pattern in layer_names:
             if pattern in name:
-                # Disable ALL quantizers for this layer (keep FP16)
-                if hasattr(module, '_input_quantizer') and module._input_quantizer is not None:
-                    module._input_quantizer.disable()
-                    disabled_count += 1
-                if hasattr(module, '_weight_quantizer') and module._weight_quantizer is not None:
-                    module._weight_quantizer.disable()
-                    disabled_count += 1
-                if hasattr(module, '_output_quantizer') and module._output_quantizer is not None:
-                    module._output_quantizer.disable()
-                    disabled_count += 1
-                print(f"    Disabled quantization for: {name} (all quantizers)")
+                is_target = True
                 break
+            
+        # Strategy 2: Robust matching for standard YOLO numeric names (0=stem, 1=stage1)
+        if not is_target:
+             parts = name.split(".")
+             if len(parts) >= 2 and parts[0] in ["model", "backbone"]:
+                 if parts[1].isdigit() and int(parts[1]) <= 2: # Stem and early blocks
+                     is_target = True
+
+        if is_target:
+            # Disable ALL quantizers for this layer (keep FP16)
+            if hasattr(module, '_input_quantizer') and module._input_quantizer is not None:
+                module._input_quantizer.disable()
+                disabled_count += 1
+            if hasattr(module, '_weight_quantizer') and module._weight_quantizer is not None:
+                module._weight_quantizer.disable()
+                disabled_count += 1
+            if hasattr(module, '_output_quantizer') and module._output_quantizer is not None:
+                module._output_quantizer.disable()
+                disabled_count += 1
+            print(f"    Disabled quantization for: {name} (all quantizers)")
     
     print(f">>> Total quantizers disabled for FP16 preservation: {disabled_count}")
 
