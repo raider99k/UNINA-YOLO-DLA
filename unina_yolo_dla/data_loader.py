@@ -156,6 +156,7 @@ def create_active_learning_dataloader(
     num_workers: int = 4,
     transform: Callable | None = None,
     difficulty_scores: dict[str, float] | None = None,
+    augment: bool = True,
 ) -> DataLoader:
     """
     Creates a DataLoader optimized for Active Learning and Hard Example Mining.
@@ -170,6 +171,8 @@ def create_active_learning_dataloader(
         num_workers: Number of worker processes for data loading.
         transform: Transforms to apply.
         difficulty_scores: Dictionary mapping image paths to difficulty scores.
+        augment: Whether to apply data augmentation (Mosaic, Mixup, etc.).
+                 Should be False for QAT Calibration.
 
     Returns:
         A configured PyTorch DataLoader.
@@ -181,7 +184,7 @@ def create_active_learning_dataloader(
             img_path=str(dataset_root),
             difficulty_scores=difficulty_scores,
             data=dict(names={0: 'yellow_cone', 1: 'blue_cone', 2: 'orange_cone', 3: 'large_orange_cone'}), # Minimal config
-            augment=True,
+            augment=augment,
             rect=False, # Active learning usually prefers square training
         )
     else:

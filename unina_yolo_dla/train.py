@@ -727,6 +727,7 @@ def train_phase2_qat(
         batch_size=batch_size,
         num_workers=workers,
         difficulty_scores=None, # No weighting needed for calibration
+        augment=False,          # CRITICAL: Clean data for accurate quantization stats
     )
     
     # Run calibration on the underlying pytorch model
@@ -734,6 +735,10 @@ def train_phase2_qat(
         collect_calibration_stats(model.model, calib_loader, num_batches=30, device=device)
     else:
         collect_calibration_stats(model, calib_loader, num_batches=30, device=device)
+    
+    # Explicit cleanup to prevent OOM before full training starts
+    del calib_loader
+    torch.cuda.empty_cache()
     
     # Fine-tune with QAT
     print(">>> Starting QAT fine-tuning...")
