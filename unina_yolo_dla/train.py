@@ -1050,21 +1050,35 @@ def train_phase2_qat(
     print(">>> Initializing quantization modules...")
     quant_modules.initialize()
     
-    # Load model with quantized layers
-    qat_model = YOLO(model_yaml)
+    # 1. Load original FP32 model to extract metadata (nc, names)
+    print(f">>> Loading FP32 weights from: {fp32_weights}")
+    try:
+        fp32_model = YOLO(fp32_weights)
+        full_nc = fp32_model.model.nc
+        full_names = fp32_model.model.names
+        print(f">>> FP32 Model loaded: nc={full_nc}, names={full_names}")
+    except Exception as e:
+        print(f">>> ERROR: Could not load FP32 weights for metadata extraction: {e}")
+        # Fallback to YAML defaults if weights fail to load
+        fp32_model = None
+        full_nc = 4
+        full_names = {i: f"class_{i}" for i in range(4)}
+
+    # 2. Load QAT model with matching structure and metadata
+    # We must use the same nc as FP32 to ensure head weights can be transferred
+    with open(model_yaml, 'r') as f:
+        cfg = yaml.safe_load(f)
+    if cfg['nc'] != full_nc:
+        print(f">>> Synchronizing QAT model nc: {cfg['nc']} -> {full_nc}")
+        cfg['nc'] = full_nc
+    
+    qat_model = YOLO(cfg)
+    qat_model.names = full_names
+    
     if hasattr(qat_model, 'model'):
         replace_silu_with_relu(qat_model.model)
     
-    # Load original FP32 model for weight extraction
-    print(f">>> Loading FP32 weights from: {fp32_weights}")
-    fp32_model = YOLO(model_yaml)
-    try:
-        fp32_model.load(fp32_weights)
-    except Exception as e:
-        print(f">>> WARNING: Could not load FP32 weights ({e}). Using random init.")
-        fp32_model = None
-    
-    # Transfer weights using intelligent matching
+    # 3. Transfer weights using intelligent matching
     if fp32_model is not None and hasattr(fp32_model, 'model') and hasattr(qat_model, 'model'):
         transfer_result = transfer_weights_fp32_to_qat(
             fp32_model.model, 
