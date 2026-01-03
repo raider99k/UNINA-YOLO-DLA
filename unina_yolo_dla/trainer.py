@@ -160,12 +160,14 @@ class UninaDLATrainer(DetectionTrainer):
         # --- Re-apply Mixed Precision Persistence ---
         # The '_disabled' attribute is lost during serialization/loading.
         # We must re-disable quantization for sensitive layers here.
-        if hasattr(self.args, 'fp16_layers') and self.args.fp16_layers:
+        # Read from _custom_qat_config (set by train.py) to avoid Ultralytics args validation
+        fp16_layers = getattr(self, '_custom_qat_config', {}).get('fp16_layers')
+        if fp16_layers:
              try:
                  from qat import set_layer_precision_fp16
-                 set_layer_precision_fp16(model, self.args.fp16_layers)
+                 set_layer_precision_fp16(model, fp16_layers)
                  if verbose and rank in (-1, 0):
-                     print(f">>> [Trainer] Restored FP16 precision for: {self.args.fp16_layers}")
+                     print(f">>> [Trainer] Restored FP16 precision for: {fp16_layers}")
              except ImportError:
                  pass
 

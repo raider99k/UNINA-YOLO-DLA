@@ -821,7 +821,7 @@ def train_phase2_qat(
     )
     
     # Filter custom arguments that would trigger SyntaxError in Ultralytics internal validation
-    # We will inject these manually into the trainer instance
+    # We will inject these into a SEPARATE attribute, NOT trainer.args
     custom_qat_config = {
         'fp16_layers': fp16_layers,
         'ema': False,
@@ -831,10 +831,9 @@ def train_phase2_qat(
         # Use custom trainer to guarantee registration of SPPF_DLA in all DDP ranks
         trainer = UninaDLATrainer(overrides=qat_args)
         
-        # Inject custom configs directly into the trainer's args namespace
-        # This bypasses the get_cfg() validation that checks for valid YOLO keys.
-        for key, value in custom_qat_config.items():
-            setattr(trainer.args, key, value)
+        # Store custom config in a SEPARATE attribute to avoid Ultralytics validation
+        # This attribute is read by UninaDLATrainer.get_model() for FP16 layer restoration
+        trainer._custom_qat_config = custom_qat_config
             
         print(f">>> QAT Trainer initialized with custom config: {custom_qat_config}")
         
