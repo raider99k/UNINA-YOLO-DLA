@@ -144,9 +144,12 @@ def collect_calibration_stats(
         print("Skipping calibration - pytorch-quantization not available.")
         return
     
-    # Robust device resolution: '0' -> 'cuda:0', 'cpu' -> 'cpu'
-    if isinstance(device, str) and device.isdigit():
-        device = f"cuda:{device}"
+    # Robust device resolution: '0,1' -> 'cuda:0', '0' -> 'cuda:0', 'cpu' -> 'cpu'
+    if isinstance(device, str):
+        if "," in device:
+            device = f"cuda:{device.split(',')[0]}"
+        elif device.isdigit():
+            device = f"cuda:{device}"
     
     model.eval()
     model.to(device)
