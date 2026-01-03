@@ -25,6 +25,13 @@ import torch.nn as nn
 import numpy as np
 import yaml
 
+# --- Environment-Aware Paths (Critical for DDP) ---
+# Ensure current directory is in PYTHONPATH for DDP subprocesses
+cwd = str(Path(__file__).parent.absolute())
+if cwd not in sys.path:
+    sys.path.insert(0, cwd)
+os.environ["PYTHONPATH"] = cwd + os.pathsep + os.environ.get("PYTHONPATH", "")
+
 # --- Ultralytics Imports ---
 try:
     from ultralytics import YOLO
@@ -94,7 +101,7 @@ except ImportError:
     print("WARNING: data_loader module not found. Hybrid loading disabled.")
 
 try:
-    from trainer import UninaDLATrainer, UninaDLAValidator, apply_dla_patches
+    from trainer import UninaDLATrainer, UninaDLAValidator, apply_dla_patches, replace_silu_with_relu
     # APPLY DLA PATCHES (parse_model monkey-patch + SPPF_DLA registration)
     # Must be done BEFORE any YOLO or DetectionModel usage
     apply_dla_patches()
