@@ -96,6 +96,7 @@ except ImportError:
 try:
     from trainer import UninaDLATrainer, UninaDLAValidator, apply_dla_patches
     # APPLY DLA PATCHES (parse_model monkey-patch + SPPF_DLA registration)
+    # Must be done BEFORE any YOLO or DetectionModel usage
     apply_dla_patches()
 except ImportError:
     print("ERROR: trainer module not found. Custom trainers will not work.")

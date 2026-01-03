@@ -41,18 +41,20 @@ def apply_dla_patches():
     setattr(ultralytics_tasks, 'SPPF_DLA', SPPF_DLA)
     ultralytics_tasks.__dict__['SPPF_DLA'] = SPPF_DLA
 
-    # 2. Patch parse_model to fix UnboundLocalError: 'scale'
-    try:
-        source = inspect.getsource(ultralytics_tasks.parse_model)
-        if "scale = d.get(\"scale\")" not in source and "scale = d.get('scale')" not in source:
-             split_marker = 'max_channels = float("inf")'
-             if split_marker in source:
-                 parts = source.split(split_marker)
-                 source = parts[0] + split_marker + '\n    scale = d.get("scale")\n    if scale is None: scale = "m" # PATCH INJECTED' + parts[1]
-                 exec(source, ultralytics_tasks.__dict__)
-                 print(f">>> Monkey-Patch applied: Injected 'scale' initialization in subprocess.")
-    except Exception as e:
-        print(f">>> WARNING: Failed to apply monkey-patch in subprocess: {e}")
+    # 2. Robust Wrapper Patch for parse_model
+    # This fixes "UnboundLocalError: scale" by ensuring scale exists in the dict
+    if not hasattr(ultralytics_tasks, '_unina_patched'):
+        original_parse_model = ultralytics_tasks.parse_model
+        
+        def patched_parse_model(d, ch, verbose=True):
+            if isinstance(d, dict) and 'scale' not in d:
+                # Inject scale if missing to prevent UnboundLocalError in Ultralytics
+                d['scale'] = 'm' 
+            return original_parse_model(d, ch, verbose)
+            
+        ultralytics_tasks.parse_model = patched_parse_model
+        ultralytics_tasks._unina_patched = True
+        print(">>> Monkey-Patch applied: Wrapped 'parse_model' to ensure 'scale' existence.")
 
 # ============================================================================
 # 2. Custom DLA Modules
@@ -101,7 +103,10 @@ class UninaDLATrainer(DetectionTrainer):
         if isinstance(cfg, str):
             with open(cfg, 'r') as f:
                 cfg = yaml.safe_load(f)
-            if 'scale' not in cfg: cfg['scale'] = 'm'
+        
+        # Ensure scale is present in the dictionary (second layer of defense)
+        if isinstance(cfg, dict) and 'scale' not in cfg:
+             cfg['scale'] = 'm'
         
         model = DetectionModel(cfg, nc=self.data['nc'], verbose=verbose and rank == -1)
         if weights: model.load(weights)
