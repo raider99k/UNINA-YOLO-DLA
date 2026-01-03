@@ -613,10 +613,11 @@ if ULTRALYTICS_AVAILABLE:
                     small_gt_cls = gt_cls[small_gt_mask]
                     num_small_gt = small_gt_mask.sum().item()
                     
-                    # 2. Prediction info (already has 'bboxes' in xyxy absolute)
-                    p_bboxes = pred["bboxes"]
-                    p_cls = pred["cls"]
-                    p_conf = pred["conf"]
+                    # 2. Prediction info (Handles both Dict and Tensor formats)
+                    if isinstance(pred, dict):
+                        p_bboxes, p_cls, p_conf = pred["bboxes"], pred["cls"], pred["conf"]
+                    else: # Tensor format: [x1, y1, x2, y2, conf, cls]
+                        p_bboxes, p_conf, p_cls = pred[:, :4], pred[:, 4], pred[:, 5]
                     
                     if p_bboxes.numel() == 0:
                         self.small_fn += num_small_gt
