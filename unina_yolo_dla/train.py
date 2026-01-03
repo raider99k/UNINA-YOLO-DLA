@@ -815,17 +815,28 @@ def train_phase2_qat(
         lr0=0.001,        # Reduced LR for fine-tuning
         warmup_epochs=0,  # No warmup for QAT
         amp=False,        # CRITICAL: QAT FakeQuant is unstable in FP16/AMP
-        ema=False,        # CRITICAL: EMA can track quantization noise
         mosaic=0.0,       # Disable mosaic for fine-tuning
         mixup=0.0,        # Disable mixup for fine-tuning
         copy_paste=0.0,   # Disable copy-paste
-        fp16_layers=fp16_layers, # Pass explicit config for persistence
     )
     
+    # Filter custom arguments that would trigger SyntaxError in Ultralytics internal validation
+    # We will inject these manually into the trainer instance
+    custom_qat_config = {
+        'fp16_layers': fp16_layers,
+        'ema': False,
+    }
+
     try:
         # Use custom trainer to guarantee registration of SPPF_DLA in all DDP ranks
         trainer = UninaDLATrainer(overrides=qat_args)
-        print(">>> QAT Trainer initialized (DDP/SPPF_DLA Robust).")
+        
+        # Inject custom configs directly into the trainer's args namespace
+        # This bypasses the get_cfg() validation that checks for valid YOLO keys.
+        for key, value in custom_qat_config.items():
+            setattr(trainer.args, key, value)
+            
+        print(f">>> QAT Trainer initialized with custom config: {custom_qat_config}")
         
         # Surgical patch for Kaggle-specific Ray issues
         patch_kaggle_environment(trainer)
@@ -835,6 +846,7 @@ def train_phase2_qat(
     except Exception as e:
         print(f">>> WARNING: Custom trainer failed for QAT: {e}")
         print(">>> Attempting fallback to standard model.train()...")
+        # For fallback, we MUST NOT include custom keys in qat_args
         results = model.train(**qat_args)
     
     best_weights = Path(project) / name / "weights" / "best.pt"
