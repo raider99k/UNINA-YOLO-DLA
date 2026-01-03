@@ -1262,7 +1262,6 @@ def train_phase2_qat(
     qat_model = YOLO(model_yaml)
     # Then overwrite with the correctly-scaled DetectionModel
     qat_model.model = DetectionModel(cfg, nc=full_nc, verbose=False)
-    qat_model.names = full_names
     qat_model.model.names = full_names
     
     if hasattr(qat_model, 'model'):

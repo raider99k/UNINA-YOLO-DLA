@@ -231,6 +231,79 @@ class ActiveLearner:
         self._cached_embeddings: np.ndarray | None = None
         self._cached_paths: list[str] | None = None
 
+    def compute_difficulty_scores(
+        self,
+        dataloader: "DataLoader",
+        mode: str = "entropy",
+    ) -> dict[str, float]:
+        """
+        Computes uncertainty scores for the entire dataset.
+
+        Args:
+            dataloader: DataLoader for the dataset.
+            mode: "entropy" or "loc_var".
+
+        Returns:
+            Dictionary mapping file paths to their uncertainty score.
+        """
+        self.model.eval()
+        scores: dict[str, float] = {}
+
+        device = next(self.model.parameters()).device
+
+        with torch.no_grad():
+            for batch in dataloader:
+                # Handle different batch structures (dict or list)
+                if isinstance(batch, dict):
+                    images = batch["images"].to(device)
+                    paths = batch["paths"]
+                else:
+                    # Fallback for standard loaders (img, targets, paths potentially)
+                    # This assumes a custom collate that returns paths
+                    # For now, strict adherence to our data_loader dict format
+                    continue
+
+                # Forward pass - returns list of (cls_head, reg_head)
+                # For MiningModelWrapper or UNINA_YOLO_DLA custom model
+                try:
+                    outputs = self.model(images)
+                except Exception as e:
+                    print(f"WARNING: Forward pass failed for batch: {e}")
+                    continue
+
+                # Verification: Check if outputs is the expected list of tuples
+                if isinstance(outputs, list) and isinstance(outputs[0], tuple):
+                    for i, path in enumerate(paths):
+                        batch_scores: list[float] = []
+                        for level_out in outputs:
+                            cls_out, reg_out = level_out
+                            # cls_out: [B, num_classes, H, W]
+                            
+                            # Ensure we are within batch bounds
+                            if i >= cls_out.shape[0]:
+                                continue
+
+                            # YOLO uses independent Sigmoid per class (Multi-label)
+                            probs = torch.sigmoid(cls_out[i]) # [C, H, W]
+
+                            if mode == "entropy":
+                                # Shannon entropy per pixel per class (Binary Entropy)
+                                # ent = -p*log(p) - (1-p)*log(1-p)
+                                ent = -(probs * torch.log(probs + 1e-10) + (1 - probs) * torch.log(1 - probs + 1e-10))
+                                # Max entropy across all classes and pixels
+                                batch_scores.append(ent.max().item())
+                            elif mode == "loc_var":
+                                # Proxy: Uncertainty in being any class (1.0 - max_conf)
+                                # Closer to 0.5 is more uncertain for sigmoid
+                                conf = probs.max(dim=0)[0]
+                                # Distance from 0.5 (scaled to [0,1])
+                                uncertainty = 1.0 - (torch.abs(conf - 0.5) * 2.0)
+                                batch_scores.append(uncertainty.max().item())
+
+                        scores[path] = max(batch_scores) if batch_scores else 0.0
+
+        return scores
+
     def query_uncertain_samples(
         self,
         silver_set_dataloader: "DataLoader",
@@ -248,44 +321,7 @@ class ActiveLearner:
         Returns:
             List of top_k most uncertain sample paths.
         """
-        self.model.eval()
-        scores: dict[str, float] = {}
-
-        device = next(self.model.parameters()).device
-
-        with torch.no_grad():
-            for batch in silver_set_dataloader:
-                images = batch["images"].to(device)
-                paths = batch["paths"]
-
-                # Forward pass - returns list of (cls_head, reg_head)
-                outputs = self.model(images)
-
-                for i, path in enumerate(paths):
-                    batch_scores: list[float] = []
-                    for level_out in outputs:
-                        cls_out, reg_out = level_out
-                        # cls_out: [B, num_classes, H, W]
-                        
-                        # YOLO uses independent Sigmoid per class (Multi-label)
-                        probs = torch.sigmoid(cls_out[i]) # [C, H, W]
-
-                        if mode == "entropy":
-                            # Shannon entropy per pixel per class (Binary Entropy)
-                            # ent = -p*log(p) - (1-p)*log(1-p)
-                            ent = -(probs * torch.log(probs + 1e-10) + (1 - probs) * torch.log(1 - probs + 1e-10))
-                            # Max entropy across all classes and pixels
-                            batch_scores.append(ent.max().item())
-                        elif mode == "loc_var":
-                            # Proxy: Uncertainty in being any class (1.0 - max_conf)
-                            # Closer to 0.5 is more uncertain for sigmoid
-                            conf = probs.max(dim=0)[0]
-                            # Distance from 0.5 (scaled to [0,1])
-                            uncertainty = 1.0 - (torch.abs(conf - 0.5) * 2.0)
-                            batch_scores.append(uncertainty.max().item())
-
-                    scores[path] = max(batch_scores) if batch_scores else 0.0
-
+        scores = self.compute_difficulty_scores(silver_set_dataloader, mode)
         return sorted(scores, key=scores.get, reverse=True)[:top_k]
 
     def coreset_selection(
