@@ -67,10 +67,14 @@ def apply_dla_patches():
             original_parse_model = tasks.parse_model
             
             def parse_model_wrapper(d, ch, verbose=True):
-                """Wrapper to ensure 'scale' is present in the config dict."""
-                # Ensure 'scale' exists in the config dictionary to satisfy the parser
-                if isinstance(d, dict) and 'scale' not in d:
-                    d['scale'] = 'm'  # Default to medium if missing
+                """Wrapper to ensure 'scale' and 'scales' are present in the config dict."""
+                # Ensure 'scale' and 'scales' exist to satisfy different Ultralytics versions
+                if isinstance(d, dict):
+                    if 'scale' not in d:
+                        d['scale'] = 'm'
+                    if 'scales' not in d:
+                        # Provides dummy scales to ensure 'scale' is bound internally in parse_model
+                        d['scales'] = {d['scale']: [1.0, 1.0, 1024]}
                 return original_parse_model(d, ch, verbose)
             
             # Mark as wrapped and replace

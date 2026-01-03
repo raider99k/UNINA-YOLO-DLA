@@ -17,6 +17,8 @@ nc: 4
 depth_multiple: 0.50
 width_multiple: 1.00  # Channels are now explicitly scaled in config
 scale: m             # Fixes UnboundLocalError: scale in Ultralytics parser
+scales:              # Added scales (plural) block for YOLOv11 compatibility
+  m: [0.5, 1.0, 1024] # [depth, width, max_channels]
 
 # NOTE: Activation is set to ReLU at runtime via train.py replace_silu_with_relu()
 # This is required for DLA compatibility (SiLU not supported on DLA)
