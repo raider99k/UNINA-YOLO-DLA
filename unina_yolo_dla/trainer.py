@@ -50,7 +50,20 @@ def apply_dla_patches():
     except (ImportError, AttributeError):
         pass
 
-    # B. Register SPPF_DLA
+    # B. Initialization of Quantization (for DDP Workers in QAT phase)
+    # If the environment variable is set, it means we are in QAT phase.
+    # We must initialize quantization BEFORE building any model in the worker.
+    if os.environ.get('UNINA_DLA_QAT') == '1':
+        try:
+             from pytorch_quantization import quant_modules
+             if not getattr(quant_modules, '_dla_initialized', False):
+                 quant_modules.initialize()
+                 quant_modules._dla_initialized = True
+                 print(">>> QAT Patch: Initialized quantization modules in worker/process.")
+        except ImportError:
+             pass
+
+    # C. Register SPPF_DLA
     if not hasattr(ultralytics_modules, 'SPPF_DLA'):
         setattr(ultralytics_modules, 'SPPF_DLA', SPPF_DLA)
         setattr(ultralytics_tasks, 'SPPF_DLA', SPPF_DLA)

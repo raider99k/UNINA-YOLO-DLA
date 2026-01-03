@@ -19,6 +19,7 @@ import argparse
 import os
 import sys
 from pathlib import Path
+from datetime import datetime
 
 import torch
 import torch.nn as nn
@@ -731,14 +732,26 @@ def train_phase2_qat(
     # Fine-tune with QAT
     print(">>> Starting QAT fine-tuning...")
     
-    # Register Small Object Metric Callback for QAT phase
-    small_obj_cb = SmallObjectCallback(size_threshold=15, image_size=imgsz)
-    model.add_callback("on_val_start", small_obj_cb.on_val_start)
-    model.add_callback("on_val_batch_end", small_obj_cb.on_val_batch_end)
-    model.add_callback("on_val_end", small_obj_cb.on_val_end)
-    print(">>> QAT Trainer and Callbacks Initialized.")
+    # DDP Robustness: Set environment variable to trigger quantization init in workers
+    os.environ['UNINA_DLA_QAT'] = '1'
     
-    results = model.train(
+    # Save a temporary checkpoint to preserve QAT structure and calibrated stats for DDP workers
+    temp_qat_dir = Path(project) / name
+    temp_qat_dir.mkdir(parents=True, exist_ok=True)
+    temp_qat_path = temp_qat_dir / "qat_init_calibrated.pt"
+    
+    # We save the underlying model to ensure all layers (QuantConv2d) and buffers (calibrators) are preserved
+    torch.save({
+        'model': model.model,
+        'nc': full_nc,
+        'names': full_names,
+        'date': datetime.now().isoformat(),
+    }, str(temp_qat_path))
+    print(f">>> QAT calibrated model saved for DDP workers: {temp_qat_path}")
+    
+    # Training arguments for UninaDLATrainer
+    qat_args = dict(
+        model=str(temp_qat_path),
         data=data_yaml,
         epochs=epochs,
         imgsz=imgsz,
@@ -752,6 +765,21 @@ def train_phase2_qat(
         lr0=0.001,        # Reduced LR for fine-tuning
         warmup_epochs=0,  # No warmup for QAT
     )
+    
+    try:
+        # Use custom trainer to guarantee registration of SPPF_DLA in all DDP ranks
+        trainer = UninaDLATrainer(overrides=qat_args)
+        print(">>> QAT Trainer initialized (DDP/SPPF_DLA Robust).")
+        
+        # Surgical patch for Kaggle-specific Ray issues
+        patch_kaggle_environment(trainer)
+        
+        trainer.train()
+        results = trainer.best if hasattr(trainer, 'best') else Path(project) / name / "weights" / "best.pt"
+    except Exception as e:
+        print(f">>> WARNING: Custom trainer failed for QAT: {e}")
+        print(">>> Attempting fallback to standard model.train()...")
+        results = model.train(**qat_args)
     
     best_weights = Path(project) / name / "weights" / "best.pt"
     print(f">>> Phase 2 Complete. Best weights: {best_weights}")
