@@ -49,7 +49,7 @@ def suppress_quantization_logs() -> None:
     # 2. Suppress specific warnings from PyTorch/NVIDIA/Albumentations
     warnings.filterwarnings('ignore', message='.*Fake quantize mode.*')
     warnings.filterwarnings('ignore', message='.*step_size is undefined.*')
-    warnings.filterwarnings('ignore', message='.*Argument\(s\) \'quality_lower\' are not valid.*')
+    warnings.filterwarnings('ignore', message=r'.*Argument\(s\) \'quality_lower\' are not valid.*')
     warnings.filterwarnings('ignore', message='.*validating an untrained model YAML.*')
     
     # 3. Suppress absl logs (the E0103... messages)

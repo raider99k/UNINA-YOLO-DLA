@@ -267,6 +267,35 @@ class SmallObjectCallback:
 # 5. Conformal Prediction Calibration (Offline)
 # ============================================================================
 
+from contextlib import contextmanager
+
+@contextmanager
+def isolate_inference_env():
+    """
+    Context manager to temporarily strip DDP environment variables.
+    
+    This is critical for running offline validation/calibration (like CP)
+    inside a script that was launched with torch.distributed.run.
+    Ultralytics' AutoBatch and device selection logic can get confused
+    if it sees DDP variables but we just want to run a local inference pass.
+    """
+    # Keys that signal DDP mode to PyTorch/Ultralytics
+    ddp_keys = ['RANK', 'LOCAL_RANK', 'WORLD_SIZE', 'MASTER_ADDR', 'MASTER_PORT']
+    stashed = {}
+    
+    # Stash and unset
+    for key in ddp_keys:
+        if key in os.environ:
+            stashed[key] = os.environ[key]
+            del os.environ[key]
+            
+    try:
+        yield
+    finally:
+        # Restore
+        for key, value in stashed.items():
+            os.environ[key] = value
+
 def calibrate_conformal_prediction(
     model,
     data_yaml: str,
@@ -973,22 +1002,40 @@ def main():
         final_weights = fp32_weights
     
     # Conformal Prediction Calibration
-    if args.calibrate_cp:
-        model = YOLO(final_weights)
-        cp_result = calibrate_conformal_prediction(
-            model=model,
-            data_yaml=data_yaml,
-            alpha=args.cp_alpha,
-            imgsz=args.imgsz,
-            batch_size=args.batch,
-            device=str(args.device),
-        )
-        # Save CP calibration result
-        import json
-        cp_path = Path(args.project) / "cp_calibration.json"
-        with open(cp_path, "w") as f:
-            json.dump(cp_result, f, indent=2)
-        print(f">>> CP calibration saved to: {cp_path}")
+    # Conformal Prediction Calibration
+    # CRITICAL: This must ONLY run on the main process (Rank 0) or non-DDP runs.
+    # DDP inference/calibration is not supported by this script's architecture.
+    rank = int(os.environ.get('RANK', -1))
+    if args.calibrate_cp and rank in {-1, 0}:
+        try:
+            with isolate_inference_env():
+                print(f">>> Starting CP Calibration on Rank {rank} (DDP env isolated)...")
+                # Reload model fresh to ensure no DDP wrappers are present
+                model = YOLO(final_weights)
+                
+                cp_result = calibrate_conformal_prediction(
+                    model=model,
+                    data_yaml=data_yaml,
+                    alpha=args.cp_alpha,
+                    imgsz=args.imgsz,
+                    batch_size=args.batch, 
+                    device=str(args.device).split(',')[0], # Force single device for calibration
+                )
+                
+                # Save CP calibration result
+                import json
+                cp_path = Path(args.project) / "cp_calibration.json"
+                with open(cp_path, "w") as f:
+                    json.dump(cp_result, f, indent=2)
+                print(f">>> CP calibration saved to: {cp_path}")
+                
+        except Exception as e:
+            print(f">>> ERROR: CP Calibration failed: {e}")
+            import traceback
+            traceback.print_exc()
+            # Don't fail the whole job, just skip CP
+    elif args.calibrate_cp:
+        print(f">>> Skipping CP Calibration on Rank {rank} (Only Rank 0 runs calibration)")
     
     # Export
     if args.export:
