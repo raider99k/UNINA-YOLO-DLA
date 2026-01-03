@@ -41,7 +41,13 @@ except ImportError:
 try:
     from pytorch_quantization import quant_modules
     from pytorch_quantization import nn as quant_nn
-    from qat import initialize_quantization # Import from our qat module
+    from qat import (
+        initialize_quantization,
+        prepare_qat_model,
+        transfer_weights_fp32_to_qat,
+        configure_entropy_calibration,
+        set_layer_precision_fp16
+    )
     QAT_AVAILABLE = True
 except ImportError:
     QAT_AVAILABLE = False
@@ -88,7 +94,7 @@ except ImportError:
     print("WARNING: data_loader module not found. Hybrid loading disabled.")
 
 try:
-    from trainer import UninaDLATrainer, UninaDLAValidator, apply_dla_patches, replace_silu_with_relu
+    from trainer import UninaDLATrainer, UninaDLAValidator, apply_dla_patches
     # APPLY DLA PATCHES (parse_model monkey-patch + SPPF_DLA registration)
     apply_dla_patches()
 except ImportError:
@@ -100,256 +106,6 @@ try:
     TRT_AVAILABLE = True
 except ImportError:
     TRT_AVAILABLE = False
-
-
-# ============================================================================
-# 2. QAT Helper Functions
-# ============================================================================
-
-def prepare_qat_model(model: nn.Module) -> nn.Module:
-    """
-    Prepare a model for Quantization Aware Training.
-    
-    This wraps Conv2d layers with QuantConv2d for fake-quantization.
-    Must be called AFTER quant_modules.initialize().
-    """
-    if not QAT_AVAILABLE:
-        print("QAT not available, returning original model.")
-        return model
-    
-    # Replace activations first
-    replace_silu_with_relu(model)
-    
-    return model
-
-
-def transfer_weights_fp32_to_qat(
-    fp32_model: nn.Module,
-    qat_model: nn.Module,
-    strict: bool = False,
-) -> dict[str, list[str]]:
-    """
-    Transfers weights from an FP32 model to a QAT model with intelligent layer matching.
-    
-    Handles the structural differences between standard PyTorch models and
-    pytorch-quantization wrapped models (Conv2d -> QuantConv2d, etc.).
-    
-    Args:
-        fp32_model: Source model with FP32 weights.
-        qat_model: Target QAT model.
-        strict: If True, raise error on any mismatch. If False, skip mismatches.
-    
-    Returns:
-        Dictionary with keys 'transferred', 'skipped', 'mismatched' listing layer names.
-    
-    Raises:
-        RuntimeError: If strict=True and there are mismatches.
-    """
-    fp32_state = fp32_model.state_dict()
-    qat_state = qat_model.state_dict()
-    
-    result = {
-        "transferred": [],
-        "skipped": [],
-        "mismatched": [],
-    }
-    
-    # Build a normalized name mapping for QAT model
-    # QuantConv2d wraps the conv layer, so paths might differ
-    qat_name_map: dict[str, str] = {}
-    for qat_name in qat_state.keys():
-        # Create normalized versions of the name for matching
-        # Remove common QAT prefixes/suffixes
-        normalized = qat_name
-        for pattern in [".conv.", "._input_quantizer.", "._weight_quantizer."]:
-            normalized = normalized.replace(pattern, ".")
-        normalized = normalized.replace("..", ".")
-        qat_name_map[normalized] = qat_name
-        qat_name_map[qat_name] = qat_name  # Also keep original
-    
-    # Track which QAT parameters have been set
-    transferred_qat_params: set[str] = set()
-    
-    print("\n>>> FP32 -> QAT Weight Transfer")
-    print("=" * 50)
-    
-    for fp32_name, fp32_param in fp32_state.items():
-        matched = False
-        
-        # Strategy 1: Direct name match
-        if fp32_name in qat_state:
-            if qat_state[fp32_name].shape == fp32_param.shape:
-                qat_state[fp32_name].copy_(fp32_param)
-                result["transferred"].append(fp32_name)
-                transferred_qat_params.add(fp32_name)
-                matched = True
-            else:
-                result["mismatched"].append(
-                    f"{fp32_name}: FP32 {fp32_param.shape} != QAT {qat_state[fp32_name].shape}"
-                )
-                matched = True  # Matched but incompatible
-        
-        # Strategy 2: Normalized name match (for QuantConv2d wrappers)
-        if not matched:
-            for qat_name in qat_state.keys():
-                if qat_name in transferred_qat_params:
-                    continue
-                    
-                # Check if the core parameter name matches
-                # FP32: backbone.stem.conv.weight
-                # QAT:  backbone.stem.conv.weight  (same, or with quant wrappers)
-                fp32_base = fp32_name.rsplit(".", 1)[-1]  # e.g., "weight" or "bias"
-                qat_base = qat_name.rsplit(".", 1)[-1]
-                
-                if fp32_base != qat_base:
-                    continue
-                
-                # Compare the structural path (without the final param name)
-                fp32_path = fp32_name.rsplit(".", 1)[0] if "." in fp32_name else ""
-                qat_path = qat_name.rsplit(".", 1)[0] if "." in qat_name else ""
-                
-                # Normalize paths for comparison
-                fp32_path_norm = fp32_path.replace("module.", "")
-                qat_path_norm = qat_path.replace("module.", "")
-                
-                # Check for structural similarity
-                if _paths_match(fp32_path_norm, qat_path_norm):
-                    if qat_state[qat_name].shape == fp32_param.shape:
-                        qat_state[qat_name].copy_(fp32_param)
-                        result["transferred"].append(f"{fp32_name} -> {qat_name}")
-                        transferred_qat_params.add(qat_name)
-                        matched = True
-                        break
-                    else:
-                        result["mismatched"].append(
-                            f"{fp32_name} ~> {qat_name}: {fp32_param.shape} != {qat_state[qat_name].shape}"
-                        )
-        
-        if not matched:
-            result["skipped"].append(fp32_name)
-    
-    # Load the modified state dict into QAT model
-    qat_model.load_state_dict(qat_state, strict=False)
-    
-    # Print summary
-    print(f"  Transferred: {len(result['transferred'])} parameters")
-    print(f"  Skipped:     {len(result['skipped'])} parameters")
-    print(f"  Mismatched:  {len(result['mismatched'])} parameters")
-    
-    if result["mismatched"]:
-        print("\n>>> SHAPE MISMATCHES:")
-        for m in result["mismatched"][:10]:
-            print(f"    {m}")
-        if len(result["mismatched"]) > 10:
-            print(f"    ... and {len(result['mismatched']) - 10} more")
-    
-    if result["skipped"] and len(result["skipped"]) <= 20:
-        print("\n>>> SKIPPED (no match found):")
-        for s in result["skipped"]:
-            print(f"    {s}")
-    elif result["skipped"]:
-        print(f"\n>>> SKIPPED: {len(result['skipped'])} parameters (too many to list)")
-    
-    if strict and (result["mismatched"] or result["skipped"]):
-        raise RuntimeError(
-            f"Strict weight transfer failed: {len(result['mismatched'])} mismatches, "
-            f"{len(result['skipped'])} skipped."
-        )
-    
-    return result
-
-
-def _paths_match(fp32_path: str, qat_path: str) -> bool:
-    """
-    Check if two module paths refer to the same logical layer.
-    
-    Handles differences like:
-    - 'backbone.stem.conv' vs 'backbone.stem.conv'
-    - 'stem.0.conv' vs 'stem.conv'
-    - 'layer1.conv' vs 'layer1.0.conv'
-    """
-    if fp32_path == qat_path:
-        return True
-    
-    # Split into components
-    fp32_parts = [p for p in fp32_path.split(".") if p]
-    qat_parts = [p for p in qat_path.split(".") if p]
-    
-    # Remove numeric indices for comparison
-    def strip_indices(parts: list[str]) -> list[str]:
-        return [p for p in parts if not p.isdigit()]
-    
-    fp32_stripped = strip_indices(fp32_parts)
-    qat_stripped = strip_indices(qat_parts)
-    
-    return fp32_stripped == qat_stripped
-
-
-def configure_entropy_calibration() -> None:
-    """
-    Configure pytorch-quantization to use Entropy calibration.
-    
-    Entropy calibration (KL Divergence) chooses a threshold that minimizes
-    information loss, which is critical for preserving small object signals.
-    
-    Reference: RESEARCH.md Section 4.3
-    """
-    if not QAT_AVAILABLE:
-        return
-    
-    from pytorch_quantization.calib import HistogramCalibrator
-    from pytorch_quantization import calib
-    
-    # Set default calibrator to Entropy (histogram-based)
-    print(">>> Configuring Entropy Calibration (KL Divergence)...")
-    calib.calibrator.CALIBRATOR_TYPE = "histogram"
-    
-    # Configure all quantizers to use entropy calibration
-    from pytorch_quantization.nn.modules import tensor_quantizer
-    tensor_quantizer.TensorQuantizer.default_calib_method = "entropy"
-
-
-def set_layer_precision_fp16(model: nn.Module, layer_names: list) -> None:
-    """
-    Set specific layers to FP16 precision for mixed-precision INT8 inference.
-    
-    The P2 head and initial backbone layers should remain in FP16
-    to preserve small object detection capability.
-    
-    CRITICAL: This function disables ALL quantizers (input, weight, and output)
-    to prevent quantization loss for small, low-contrast features.
-    
-    Reference: RESEARCH.md Section 4.2 (Layer-Wise Mixed Precision)
-    
-    Args:
-        model: The model to configure.
-        layer_names: List of layer name patterns to keep in FP16.
-    """
-    if not QAT_AVAILABLE:
-        return
-    
-    from pytorch_quantization.nn.modules import tensor_quantizer
-    
-    print(f">>> Setting FP16 precision for sensitive layers: {layer_names}")
-    disabled_count = 0
-    for name, module in model.named_modules():
-        # Check if this layer matches any of the patterns
-        for pattern in layer_names:
-            if pattern in name:
-                # Disable ALL quantizers for this layer (keep FP16)
-                if hasattr(module, '_input_quantizer') and module._input_quantizer is not None:
-                    module._input_quantizer.disable()
-                    disabled_count += 1
-                if hasattr(module, '_weight_quantizer') and module._weight_quantizer is not None:
-                    module._weight_quantizer.disable()
-                    disabled_count += 1
-                if hasattr(module, '_output_quantizer') and module._output_quantizer is not None:
-                    module._output_quantizer.disable()
-                    disabled_count += 1
-                print(f"    Disabled quantization for: {name} (all quantizers)")
-                break
-    
-    print(f">>> Total quantizers disabled for FP16 preservation: {disabled_count}")
 
 
 # ============================================================================
