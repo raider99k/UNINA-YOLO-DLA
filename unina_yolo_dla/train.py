@@ -382,7 +382,17 @@ def calibrate_conformal_prediction(
     
     print(f">>> CP Calibration source: {val_images_path} ({len(image_files)} images)")
     
-    # Run prediction on validation set
+    # Resolve labels directory from data YAML
+    labels_rel = data_cfg.get('val') or data_cfg.get('test')
+    if isinstance(labels_rel, list): labels_rel = labels_rel[0]
+    # Standard Ultralytics structure: images/val -> labels/val
+    labels_path = base_path / labels_rel.replace('images', 'labels') if labels_rel else base_path
+    if not labels_path.exists():
+        # Fallback: try parent.parent/labels structure
+        labels_path = val_images_path.parent.parent / "labels" / val_images_path.name
+    print(f">>> Labels path: {labels_path}")
+    
+    # Run prediction on validation set with low confidence threshold to get more predictions
     results = model.predict(
         source=str(val_images_path),
         imgsz=imgsz,
@@ -390,6 +400,7 @@ def calibrate_conformal_prediction(
         device=device,
         save=False,
         verbose=False,
+        conf=0.001,  # Very low threshold to get more predictions for calibration
         stream=True,  # Process one by one to save memory
     )
     
@@ -398,8 +409,11 @@ def calibrate_conformal_prediction(
     total_predictions = 0
     total_ground_truths = 0
     total_matches = 0
+    images_processed = 0
     
     for result in results:
+        images_processed += 1
+        
         # Get predictions (xyxy format, absolute coordinates)
         if result.boxes is None or len(result.boxes) == 0:
             continue
@@ -412,7 +426,15 @@ def calibrate_conformal_prediction(
         # result.path gives us the image path, we need to find corresponding label
         if hasattr(result, 'path') and result.path:
             img_path = Path(result.path)
-            label_path = img_path.parent.parent / "labels" / (img_path.stem + ".txt")
+            
+            # Try standard Ultralytics structure first
+            label_path = labels_path / (img_path.stem + ".txt")
+            if not label_path.exists():
+                # Fallback: parent.parent/labels structure
+                label_path = img_path.parent.parent / "labels" / img_path.parent.name / (img_path.stem + ".txt")
+            if not label_path.exists():
+                # Last fallback: sibling labels folder
+                label_path = img_path.parent.parent / "labels" / (img_path.stem + ".txt")
             
             if label_path.exists():
                 gt_boxes = []
@@ -459,10 +481,12 @@ def calibrate_conformal_prediction(
                         # This measures "how wrong" the box localization is
                         nonconformity_scores.append(1.0 - best_iou)
     
+    print(f">>> Images processed: {images_processed}")
     print(f">>> Collected {len(nonconformity_scores)} matched predictions")
     print(f"    Total predictions: {total_predictions}")
     print(f"    Total ground truths: {total_ground_truths}")
     print(f"    Matched pairs: {total_matches}")
+
     
     # Calculate the (1 - alpha) quantile of nonconformity scores
     if len(nonconformity_scores) == 0:
