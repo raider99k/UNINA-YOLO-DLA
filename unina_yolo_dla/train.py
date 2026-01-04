@@ -776,7 +776,7 @@ def train_phase2_qat(
     # Set layer-wise precision: Keep P2 head and first backbone layers in FP16
     # (RESEARCH.md Section 4.2 - Mixed Precision Layer-Wise)
     # Using specific UNINA_YOLO_DLA_QAT component names
-    fp16_layers = ["head_p2", "stem", "stage1_conv", "head_p2_cls", "head_p2_reg", "cv1"] 
+    fp16_layers = ["head_p2", "stem", "stage1_conv", "head_p2_cls", "head_p2_reg"] 
     if hasattr(model, 'model'):
         set_layer_precision_fp16(model.model, fp16_layers)
     
