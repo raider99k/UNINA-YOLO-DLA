@@ -361,9 +361,20 @@ def calibrate_conformal_prediction(
     
     print(f">>> Running validation for CP calibration (alpha={alpha})...")
     
+    # Parse data YAML to get validation images directory
+    with open(data_yaml, 'r') as f:
+        data_cfg = yaml.safe_load(f)
+    
+    base_path = Path(data_cfg.get('path', Path(data_yaml).parent))
+    val_rel = data_cfg.get('val') or data_cfg.get('test')
+    if isinstance(val_rel, list): val_rel = val_rel[0]
+    val_images_path = base_path / val_rel if val_rel else base_path
+    
+    print(f">>> CP Calibration source: {val_images_path}")
+    
     # Run prediction on validation set
     results = model.predict(
-        source=data_yaml,
+        source=str(val_images_path),
         imgsz=imgsz,
         batch=batch_size,
         device=device,
