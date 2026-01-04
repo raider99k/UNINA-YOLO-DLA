@@ -370,7 +370,17 @@ def calibrate_conformal_prediction(
     if isinstance(val_rel, list): val_rel = val_rel[0]
     val_images_path = base_path / val_rel if val_rel else base_path
     
-    print(f">>> CP Calibration source: {val_images_path}")
+    # Validate that the path exists and contains images
+    if not val_images_path.exists():
+        raise FileNotFoundError(f"CP Calibration: Validation images path does not exist: {val_images_path}")
+    
+    # Check for common image extensions
+    image_extensions = {'.jpg', '.jpeg', '.png', '.bmp', '.tif', '.tiff', '.webp'}
+    image_files = [f for f in val_images_path.iterdir() if f.suffix.lower() in image_extensions] if val_images_path.is_dir() else []
+    if not image_files:
+        raise FileNotFoundError(f"CP Calibration: No images found in {val_images_path}")
+    
+    print(f">>> CP Calibration source: {val_images_path} ({len(image_files)} images)")
     
     # Run prediction on validation set
     results = model.predict(
@@ -856,6 +866,8 @@ def train_phase2_qat(
     except Exception as e:
         print(f">>> WARNING: Custom trainer failed for QAT: {e}")
         print(">>> Attempting fallback to standard model.train()...")
+        print(">>> WARNING: Fallback mode - FP16 layer precision settings will NOT be applied!")
+        print(">>>          This may degrade small object detection performance.")
         # For fallback, we MUST NOT include custom keys in qat_args
         results = model.train(**qat_args)
     

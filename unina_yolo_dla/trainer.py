@@ -158,18 +158,24 @@ class UninaDLATrainer(DetectionTrainer):
         replace_silu_with_relu(model)
 
         # --- Re-apply Mixed Precision Persistence ---
-        # The '_disabled' attribute is lost during serialization/loading.
+        # The '_disabled' attribute on quantizers is lost during serialization/loading.
         # We must re-disable quantization for sensitive layers here.
         # Read from _custom_qat_config (set by train.py) to avoid Ultralytics args validation
-        fp16_layers = getattr(self, '_custom_qat_config', {}).get('fp16_layers')
-        if fp16_layers:
-             try:
-                 from qat import set_layer_precision_fp16
-                 set_layer_precision_fp16(model, fp16_layers)
-                 if verbose and rank in (-1, 0):
-                     print(f">>> [Trainer] Restored FP16 precision for: {fp16_layers}")
-             except ImportError:
-                 pass
+        custom_config = getattr(self, '_custom_qat_config', None)
+        if custom_config is not None:
+            fp16_layers = custom_config.get('fp16_layers')
+            if fp16_layers:
+                try:
+                    from qat import set_layer_precision_fp16
+                    set_layer_precision_fp16(model, fp16_layers)
+                    if verbose and rank in (-1, 0):
+                        print(f">>> [Trainer] Restored FP16 precision for: {fp16_layers}")
+                except ImportError as e:
+                    if verbose and rank in (-1, 0):
+                        print(f">>> [Trainer] WARNING: Could not import qat module for FP16 restoration: {e}")
+                except Exception as e:
+                    if verbose and rank in (-1, 0):
+                        print(f">>> [Trainer] ERROR: Failed to restore FP16 precision: {e}")
 
         return model
 
