@@ -765,7 +765,7 @@ def create_qat_model(num_classes: int = 4, base_channels: int = 32) -> UNINA_YOL
 
 
 def export_qat_onnx(
-    model: UNINA_YOLO_DLA_QAT,
+    model: nn.Module,
     filepath: str,
     input_size: int = 640,
 ) -> None:
@@ -776,11 +776,26 @@ def export_qat_onnx(
     that TensorRT can interpret for INT8 inference.
     """
     model.eval()
-    dummy_input = torch.randn(1, 3, input_size, input_size)
+    device = next(model.parameters()).device
+    dummy_input = torch.randn(1, 3, input_size, input_size, device=device)
     
     if QUANT_AVAILABLE:
         # Enable INT8 mode for export
         quant_nn.TensorQuantizer.use_fb_fake_quant = True
+    
+    # Dynamically determine output names by running a forward pass
+    with torch.no_grad():
+        outputs = model(dummy_input)
+    
+    # Handle different output formats
+    if isinstance(outputs, (tuple, list)):
+        num_outputs = len(outputs)
+        output_names = [f'output_{i}' for i in range(num_outputs)]
+    else:
+        num_outputs = 1
+        output_names = ['output']
+    
+    print(f"[QAT] Model has {num_outputs} outputs, exporting...")
     
     torch.onnx.export(
         model,
@@ -788,11 +803,12 @@ def export_qat_onnx(
         filepath,
         opset_version=13,
         input_names=['images'],
-        output_names=['p2_cls', 'p2_reg', 'p3_cls', 'p3_reg', 'p4_cls', 'p4_reg'],
+        output_names=output_names,
         dynamic_axes=None,
     )
     
     print(f"[QAT] Model exported to {filepath}")
+
 
 
 # --- Example Usage ---
